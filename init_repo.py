@@ -14,7 +14,7 @@ def init_fdroid_repo():
     config_file = Path('/app/config.yml')
     
     # Initialize repository if not already done
-    if not (repo_dir / 'repo').exists():
+    if not (repo_dir / 'config.yml').exists():
         print("Initializing F-Droid repository...")
         try:
             subprocess.run(['fdroid', 'init'], check=True, cwd=repo_dir)
