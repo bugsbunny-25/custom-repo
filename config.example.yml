@@ -1,0 +1,170 @@
+# Example F-Droid Repository Configuration
+# This file shows various configuration scenarios for different use cases
+
+repo_name: "My Custom F-Droid Repo"
+repo_description: "Custom F-Droid repository with apps from GitHub"
+repo_url: "https://fdroid.yourdomain.com/fdroid"
+repo_icon: "icon.png"
+
+# Check for updates every hour
+update_interval: 3600
+
+# Optional: GitHub Personal Access Token
+# Get one at: https://github.com/settings/tokens
+# Without token: 60 requests/hour
+# With token: 5000 requests/hour
+github_token: ""
+
+# Global defaults - applied to repos without specific settings
+defaults:
+  include_prereleases: true   # Include beta/alpha/RC releases
+  include_drafts: false       # Don't include draft releases
+  max_releases: 5             # Check last 5 releases per repo
+  enabled: true               # Enable by default
+
+# GitHub repositories to monitor
+github_repos:
+  
+  # ============================================================
+  # SIMPLE FORMAT - Uses global defaults
+  # ============================================================
+  
+  - "termux/termux-app"
+  - "k9mail/k-9"
+  
+  
+  # ============================================================
+  # STABLE RELEASES ONLY - Production apps
+  # ============================================================
+  
+  - repo: "signalapp/Signal-Android"
+    include_prereleases: false  # Only stable releases
+    max_releases: 2             # Check last 2 releases
+  
+  - repo: "guardianproject/haven"
+    include_prereleases: false
+    max_releases: 3
+  
+  
+  # ============================================================
+  # BETA/NIGHTLY BUILDS - Apps with frequent pre-releases
+  # ============================================================
+  
+  - repo: "mozilla-mobile/fenix"
+    include_prereleases: true   # Include beta releases
+    max_releases: 10            # Check more releases
+  
+  - repo: "NewPipe/NewPipe"
+    include_prereleases: true
+    max_releases: 8
+  
+  
+  # ============================================================
+  # INTERNAL/TESTING - Everything including drafts
+  # ============================================================
+  
+  - repo: "mycompany/internal-test-app"
+    include_prereleases: true
+    include_drafts: true        # Include unpublished drafts
+    max_releases: 20            # Check many releases
+  
+  
+  # ============================================================
+  # ARCHIVED/DISABLED - Temporarily disabled repos
+  # ============================================================
+  
+  - repo: "oldproject/deprecated-app"
+    enabled: false              # Skip this repo entirely
+  
+  
+  # ============================================================
+  # YOUR APPS - Custom configurations
+  # ============================================================
+  
+  # Your main app
+  - repo: "your-username/your-app"
+    include_prereleases: true
+    max_releases: 5
+  
+  # Your nightly build repo
+  - repo: "your-username/your-app-nightly"
+    include_prereleases: true
+    include_drafts: true
+    max_releases: 30            # Check many nightlies
+  
+  # Your stable releases repo
+  - repo: "your-username/your-app-stable"
+    include_prereleases: false
+    max_releases: 3
+
+
+# ============================================================
+# APK MANAGEMENT
+# ============================================================
+
+# Pattern to match APK files (regex)
+apk_pattern: ".*\\.apk$"
+
+# Cleanup old APKs to save disk space
+# Set to 0 to keep all versions (no cleanup)
+# Set to a number to keep only that many versions per app
+max_versions_per_app: 0
+
+# Examples:
+# max_versions_per_app: 5   # Keep only 5 newest APKs per app
+# max_versions_per_app: 0   # Keep all APKs (no cleanup)
+
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+log_level: "INFO"
+# Options: DEBUG, INFO, WARNING, ERROR
+
+
+# ============================================================
+# USAGE SCENARIOS
+# ============================================================
+
+# Scenario 1: Conservative (stable releases only, few checks)
+# ------------------------------------------------------------
+# defaults:
+#   include_prereleases: false
+#   max_releases: 3
+# github_repos:
+#   - "app1/repo"
+#   - "app2/repo"
+
+# Scenario 2: Aggressive (all releases, including nightlies)
+# ------------------------------------------------------------
+# defaults:
+#   include_prereleases: true
+#   max_releases: 15
+# github_repos:
+#   - repo: "nightly-app/repo"
+#     include_drafts: true
+#     max_releases: 30
+# max_versions_per_app: 10  # Cleanup to save space
+
+# Scenario 3: Mixed (different settings per app)
+# ------------------------------------------------------------
+# defaults:
+#   include_prereleases: true
+#   max_releases: 5
+# github_repos:
+#   - "standard-app/repo"  # Uses defaults
+#   - repo: "stable-app/repo"
+#     include_prereleases: false
+#   - repo: "nightly-app/repo"
+#     max_releases: 20
+
+# Scenario 4: API Rate Limit Friendly (minimal checks)
+# ------------------------------------------------------------
+# defaults:
+#   max_releases: 1  # Only check latest release
+# github_repos:
+#   - "app1/repo"
+#   - "app2/repo"
+#   - "app3/repo"
+# update_interval: 7200  # Check every 2 hours instead of 1

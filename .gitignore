@@ -1,0 +1,34 @@
+# Logs
+logs/
+*.log
+
+# Data directories
+data/
+
+# Environment variables
+.env
+
+# Docker volumes
+volumes/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+
+# F-Droid specific
+*.jks
+*.keystore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
