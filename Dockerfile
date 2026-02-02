@@ -1,15 +1,14 @@
 FROM debian:bookworm-slim
 
-# Install dependencies
 RUN apt-get update && apt-get install -y \
     fdroidserver \
     python3 \
     python3-pip \
     python3-requests \
+    python3-ruamel.yaml \
     curl \
     wget \
     unzip \
-    git \
     openjdk-17-jdk-headless \
     nginx \
     supervisor \
@@ -19,42 +18,38 @@ RUN apt-get update && apt-get install -y \
 ENV ANDROID_HOME=/opt/android-sdk
 ENV PATH=${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/34.0.0
 
-# Download and install Android SDK command line tools
+# Download and install Android SDK
 RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
-    cd ${ANDROID_HOME}/cmdline-tools && \
-    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip && \
-    unzip commandlinetools-linux-11076708_latest.zip && \
-    rm commandlinetools-linux-11076708_latest.zip && \
-    mv cmdline-tools latest
-
-# Accept licenses and install required SDK components
-RUN yes | sdkmanager --licenses && \
+    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmd-tools.zip && \
+    unzip -q /tmp/cmd-tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
+    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+    rm /tmp/cmd-tools.zip && \
+    yes | sdkmanager --licenses && \
     sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-34"
 
-# Install Python dependencies
-RUN pip3 install --no-cache-dir requests ruamel.yaml schedule --break-system-packages
+RUN pip3 install --no-cache-dir schedule --break-system-packages
 
 # Create necessary directories
 RUN mkdir -p /srv/fdroid/repo \
     /srv/fdroid/metadata \
     /srv/fdroid/tmp \
-    /var/log/supervisor \
     /app
 
-# Copy application files
-COPY update_checker.py /app/update_checker.py
-COPY init_repo.py /app/init_repo.py
+COPY update_checker.py init_repo.py /app/
 COPY nginx.conf /etc/nginx/sites-available/default
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+
+# Make the entrypoint executable
+RUN chmod +x /app/docker-entrypoint.sh
 
 # Set working directory
 WORKDIR /srv/fdroid
 
-# Initialize the F-Droid repository
-RUN python3 /app/init_repo.py
-
 # Expose port
 EXPOSE 80
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
 # Start supervisor
-CMD ["sh", "-c", "mkdir -p /var/log/supervisor && exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
