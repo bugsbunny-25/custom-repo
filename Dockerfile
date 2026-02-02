@@ -57,4 +57,4 @@ RUN python3 /app/init_repo.py
 EXPOSE 80
 
 # Start supervisor
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+CMD ["sh", "-c", "mkdir -p /var/log/supervisor && exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf"]
