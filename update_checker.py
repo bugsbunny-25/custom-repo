@@ -4,7 +4,6 @@ GitHub Release Monitor for F-Droid Repository
 Checks GitHub releases for APK files and updates the F-Droid repo
 """
 
-from logging import config
 import os
 import sys
 import time
@@ -344,18 +343,22 @@ class FDroidUpdater:
             logger.error(f"Error during cleanup: {e}")
     
     def update_fdroid_config(self):
-        # Create config.yml for F-Droid
-        fdroid_config = {
-            'repo_name': self.config.get('repo_name', 'My F-Droid Repo'),
-            'repo_description': self.config.get('repo_description', 'Custom F-Droid Repository'),
-            'repo_url': self.config.get('repo_url', 'https://example.com/fdroid'),
-            'repo_icon': self.config.get('repo_icon', 'icon.png'),
-            'archive_older': 3,
-            'make_current_version_link': True,
-            'update_stats': True,
-        }
-
+        # Open config.yml for F-Droid
         fdroid_config_path = Path('/srv/fdroid/config.yml')
+        if fdroid_config_path.exists():
+            with open(fdroid_config_path, 'r') as f:
+                fdroid_config = yaml.load(f)
+        else:
+            fdroid_config = {}
+
+        fdroid_config['repo_name'] = self.config.get('repo_name', 'My F-Droid Repo')
+        fdroid_config['repo_description'] = self.config.get('repo_description', 'Custom F-Droid Repository')
+        fdroid_config['repo_url'] = self.config.get('repo_url', 'https://example.com/fdroid')
+        fdroid_config['repo_icon'] = self.config.get('repo_icon', 'icon.png')
+        fdroid_config['archive_older'] = 3
+        fdroid_config['make_current_version_link'] = True
+        fdroid_config['update_stats'] = True
+
         with open(fdroid_config_path, 'w') as f:
             yaml.dump(fdroid_config, f)
         
