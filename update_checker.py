@@ -4,9 +4,11 @@ GitHub Release Monitor for F-Droid Repository
 Checks GitHub releases for APK files and updates the F-Droid repo
 """
 
+from logging import config
 import os
 import sys
 import time
+from turtle import up
 from ruamel.yaml import YAML
 import json
 import hashlib
@@ -341,6 +343,25 @@ class FDroidUpdater:
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
     
+    def update_fdroid_config(self):
+        # Create config.yml for F-Droid
+        fdroid_config = {
+            'repo_name': self.config.get('repo_name', 'My F-Droid Repo'),
+            'repo_description': self.config.get('repo_description', 'Custom F-Droid Repository'),
+            'repo_url': self.config.get('repo_url', 'https://example.com/fdroid'),
+            'repo_icon': self.config.get('repo_icon', 'icon.png'),
+            'archive_older': 3,
+            'make_current_version_link': True,
+            'update_stats': True,
+        }
+
+        fdroid_config_path = Path('/srv/fdroid/config.yml')
+        with open(fdroid_config_path, 'w') as f:
+            yaml.dump(fdroid_config, f)
+        
+        self._update_fdroid_repo()
+        print("F-Droid repository configuration created")
+    
     def run_scheduler(self):
         """Run the update checker on a schedule"""
         interval = self.config.get('update_interval', 3600)
@@ -359,6 +380,7 @@ class FDroidUpdater:
 if __name__ == '__main__':
     try:
         updater = FDroidUpdater()
+        updater.update_fdroid_config()
         updater.run_scheduler()
     except KeyboardInterrupt:
         logger.info("Shutting down...")
