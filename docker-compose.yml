@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  fdroid-repo:
+    image: ghcr.io/bugsbunny-25/custom-repo:main
+    container_name: fdroid-repo
+    restart: unless-stopped
+    
+    volumes:
+      # Persist the F-Droid repository data
+      - ${CONFIG_FOLDER}/fdroid-data/:/srv/fdroid
+      
+      # Mount configuration (edit this file to add your GitHub repos)
+      - ${CONFIG_FOLDER}/config.yml:/app/config.yml:ro
+      
+      # Optional: persist logs
+      - ${CONFIG_FOLDER}/logs:/var/log
+    
+    environment:
+      - TZ=UTC
+    
+    # Expose port (will be proxied by your nginx reverse proxy)
+    ports:
+      - "8080:80"  # Change 8080 to your preferred port
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
