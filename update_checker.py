@@ -7,7 +7,6 @@ Checks GitHub releases for APK files and updates the F-Droid repo
 import os
 import sys
 import time
-from turtle import up
 from ruamel.yaml import YAML
 import json
 import hashlib
@@ -265,12 +264,6 @@ class FDroidUpdater:
                     for asset in apk_assets:
                         asset_name = asset['name']
                         download_url = asset['browser_download_url']
-                        
-                        # Check if this specific APK was already downloaded
-                        existing_file = self.repo_dir / asset_name
-                        if existing_file.exists():
-                            logger.info(f"{repo_name}: {asset_name} already exists, skipping")
-                            continue
                         
                         if self._download_apk(download_url, asset_name):
                             downloaded_count += 1
