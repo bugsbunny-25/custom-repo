@@ -265,7 +265,7 @@ class FDroidUpdater:
                         asset_name = asset['name']
                         download_url = asset['browser_download_url']
                         
-                        if self._download_apk(download_url, asset_name):
+                        if self._download_apk(download_url, f"{release_id}-{asset_name}"):
                             downloaded_count += 1
                             updated = True
                     
