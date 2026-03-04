@@ -14,6 +14,7 @@ import requests
 import logging
 import subprocess
 import schedule
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -63,7 +64,8 @@ class FDroidUpdater:
                     'include_prereleases': defaults.get('include_prereleases', True),
                     'include_drafts': defaults.get('include_drafts', False),
                     'max_releases': defaults.get('max_releases', 5),
-                    'enabled': defaults.get('enabled', True)
+                    'enabled': defaults.get('enabled', True),
+                    'apk_pattern': defaults.get('apk_pattern', self.config.get('apk_pattern', r'.*\.apk$'))
                 }
             else:
                 # Detailed format: dict with custom settings
@@ -76,13 +78,17 @@ class FDroidUpdater:
                     'max_releases': repo_config.get('max_releases', 
                                                     defaults.get('max_releases', 5)),
                     'enabled': repo_config.get('enabled', 
-                                              defaults.get('enabled', True))
+                                              defaults.get('enabled', True)),
+                    'apk_pattern': repo_config.get('apk_pattern',
+                                                   defaults.get('apk_pattern',
+                                                                self.config.get('apk_pattern', r'.*\.apk$')))
                 }
             
             if repo['repo'] and repo['enabled']:
                 repos.append(repo)
                 logger.info(f"Configured {repo['repo']}: prereleases={repo['include_prereleases']}, "
-                          f"drafts={repo['include_drafts']}, max_releases={repo['max_releases']}")
+                          f"drafts={repo['include_drafts']}, max_releases={repo['max_releases']}, "
+                          f"apk_pattern={repo['apk_pattern']}")
             elif repo['repo']:
                 logger.info(f"Skipping disabled repo: {repo['repo']}")
         
@@ -180,6 +186,25 @@ class FDroidUpdater:
             if filepath.exists():
                 filepath.unlink()
             return False
+
+    def _get_apk_assets(self, release, repo_config, repo_name, release_tag):
+        """Return release assets matching this repo's configured APK regex."""
+        pattern = repo_config.get('apk_pattern', r'.*\.apk$')
+        try:
+            asset_pattern = re.compile(pattern)
+        except re.error as e:
+            logger.error(f"{repo_name}: Invalid apk_pattern '{pattern}': {e}. Falling back to .*\\.apk$")
+            asset_pattern = re.compile(r'.*\.apk$')
+            pattern = r'.*\.apk$'
+
+        assets = release.get('assets', [])
+        matching_assets = [
+            asset for asset in assets
+            if asset_pattern.search(asset.get('name', ''))
+        ]
+
+        logger.info(f"{repo_name}: {len(matching_assets)} matching asset(s) for {release_tag} using apk_pattern={pattern}")
+        return matching_assets
     
     def _compute_hash(self, filepath):
         """Compute SHA256 hash of a file"""
@@ -242,11 +267,8 @@ class FDroidUpdater:
                     
                     logger.info(f"{repo_name}: Processing {release_type} release {release_tag}")
                     
-                    # Look for APK files in assets
-                    apk_assets = [
-                        asset for asset in release.get('assets', [])
-                        if asset['name'].endswith('.apk')
-                    ]
+                    # Look for APK files in assets using per-repo regex
+                    apk_assets = self._get_apk_assets(release, repo_config, repo_name, release_tag)
                     
                     if not apk_assets:
                         logger.warning(f"{repo_name}: No APK files found in release {release_tag}")
@@ -285,7 +307,8 @@ class FDroidUpdater:
                 self.cache[repo_name]['config'] = {
                     'include_prereleases': repo_config['include_prereleases'],
                     'include_drafts': repo_config['include_drafts'],
-                    'max_releases': repo_config['max_releases']
+                    'max_releases': repo_config['max_releases'],
+                    'apk_pattern': repo_config.get('apk_pattern', r'.*\.apk$')
                 }
                 
             except Exception as e:
