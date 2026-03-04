@@ -37,6 +37,7 @@ class FDroidUpdater:
             self.config = yaml.load(f)
         
         self.repo_dir = Path('/srv/fdroid/repo')
+        self.archive_dir = Path('/srv/fdroid/archive')
         self.metadata_dir = Path('/srv/fdroid/metadata')
         self.cache_file = Path('/srv/fdroid/tmp/cache.json')
         
@@ -342,18 +343,33 @@ class FDroidUpdater:
         logger.info(f"Cleaning up old APKs (keeping max {max_versions} versions per app)...")
         
         try:
-            # Group APKs by package name (simplified version)
-            # This is a basic implementation - you might want to enhance it
-            apk_files = list(self.repo_dir.glob('*.apk'))
-            
-            # Sort by modification time (newest first)
-            apk_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-            
-            # Keep only the newest max_versions files
-            if len(apk_files) > max_versions:
-                for old_apk in apk_files[max_versions:]:
-                    logger.info(f"Removing old APK: {old_apk.name}")
-                    old_apk.unlink()
+            # Build release_id -> repo map from cache so cleanup happens per app/repo.
+            release_to_repo = {}
+            for repo_name, repo_cache in self.cache.items():
+                processed = repo_cache.get('processed_releases', {})
+                for release_id in processed.keys():
+                    release_to_repo[release_id] = repo_name
+
+            def cleanup_directory(directory):
+                # Group APKs by repo (app). Filenames are stored as: {release_id}-{asset_name}
+                apk_groups = {}
+                apk_files = list(directory.glob('*.apk'))
+                for apk in apk_files:
+                    filename = apk.name
+                    release_id, _, _ = filename.partition('-')
+                    app_key = release_to_repo.get(release_id, 'unknown-app')
+                    apk_groups.setdefault(app_key, []).append(apk)
+
+                # Per app: keep newest max_versions and remove the rest.
+                for app_key, files in apk_groups.items():
+                    files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                    if len(files) > max_versions:
+                        for old_apk in files[max_versions:]:
+                            logger.info(f"Removing old APK for {app_key} from {directory}: {old_apk.name}")
+                            old_apk.unlink()
+
+            cleanup_directory(self.repo_dir)
+            cleanup_directory(self.archive_dir)
         
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
