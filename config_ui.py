@@ -98,6 +98,7 @@ def list_repos(config, cache):
             if not isinstance(entry, dict):
                 continue
             checked_entries.append({
+                'build_number': str(release_id),
                 'release_id': str(release_id),
                 'tag': entry.get('tag', ''),
                 'type': entry.get('type', ''),
@@ -256,6 +257,8 @@ HTML = """<!doctype html>
       font-size: 12px;
     }
     .entry-list { display: flex; flex-direction: column; gap: 8px; min-width: 300px; }
+    .checked-wrap details { border: 1px solid #dbe2e8; border-radius: 8px; padding: 6px 8px; background: #fbfcfd; }
+    .checked-wrap summary { cursor: pointer; font-size: 12px; color: #334155; font-weight: 600; }
     .entry {
       border: 1px solid #dbe2e8;
       border-radius: 8px;
@@ -393,15 +396,15 @@ HTML = """<!doctype html>
 
       for (const repo of data.repos) {
         const entriesHtml = repo.checked_entries.length
-          ? `<div class="entry-list">${repo.checked_entries.map((entry) => `
+          ? `<div class="checked-wrap"><details><summary>${repo.checked_entries.length} checked release(s)</summary><div class="entry-list">${repo.checked_entries.map((entry) => `
               <div class="entry">
                 <div class="entry-main">
                   <strong>${escapeHtml(entry.tag || entry.release_id)}</strong>
-                  <span class="entry-meta"> (${escapeHtml(entry.type || 'stable')}) • APKs ${entry.apks_downloaded}/${entry.apks_found}</span>
+                  <span class="entry-meta"> (${escapeHtml(entry.type || 'stable')}) • Build ${escapeHtml(entry.build_number)} • APKs ${entry.apks_downloaded}/${entry.apks_found}</span>
                 </div>
-                <button class="btn ghost small" data-delete-id="${repo.id}" data-release-id="${encodeURIComponent(entry.release_id)}">Delete</button>
+                <button class="btn ghost small" data-delete-id="${repo.id}" data-release-id="${encodeURIComponent(entry.build_number)}">Delete</button>
               </div>
-            `).join('')}</div>`
+            `).join('')}</div></details></div>`
           : '<span class="pill">None</span>';
 
         const tr = document.createElement('tr');
