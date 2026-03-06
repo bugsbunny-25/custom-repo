@@ -11,7 +11,7 @@ services:
       - ${CONFIG_FOLDER}/fdroid-data/:/srv/fdroid
       
       # Mount configuration (edit this file to add your GitHub repos)
-      - ${CONFIG_FOLDER}/config.yml:/app/config.yml:ro
+      - ${CONFIG_FOLDER}/config.yml:/app/config.yml
       
       # Optional: persist logs
       - ${CONFIG_FOLDER}/logs:/var/log

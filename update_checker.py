@@ -33,24 +33,34 @@ yaml.preserve_quotes = True
 
 class FDroidUpdater:
     def __init__(self, config_path='/app/config.yml'):
-        with open(config_path, 'r') as f:
-            self.config = yaml.load(f)
+        self.config_path = Path(config_path)
+        self.config = {}
         
         self.repo_dir = Path('/srv/fdroid/repo')
         self.archive_dir = Path('/srv/fdroid/archive')
         self.metadata_dir = Path('/srv/fdroid/metadata')
         self.cache_file = Path('/srv/fdroid/tmp/cache.json')
         
+        # Runtime config-dependent fields
+        self.headers = {}
+        self.repos = []
+        
+        # Load cache
+        self.cache = self._load_cache()
+        self.reload_config()
+
+    def reload_config(self):
+        """Reload config from disk and refresh derived runtime settings."""
+        with open(self.config_path, 'r') as f:
+            self.config = yaml.load(f)
+
         # Set up GitHub API headers
         self.headers = {'Accept': 'application/vnd.github.v3+json'}
         if self.config.get('github_token'):
             self.headers['Authorization'] = f"token {self.config['github_token']}"
-        
+
         # Parse repo configurations
         self.repos = self._parse_repo_configs()
-        
-        # Load cache
-        self.cache = self._load_cache()
     
     def _parse_repo_configs(self):
         """Parse repository configurations, applying defaults where needed"""
@@ -239,6 +249,8 @@ class FDroidUpdater:
     
     def check_for_updates(self):
         """Check all configured repos for updates"""
+        self.reload_config()
+        self.cache = self._load_cache()
         logger.info("Starting update check...")
         updated = False
         

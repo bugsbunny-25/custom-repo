@@ -41,7 +41,7 @@ RUN mkdir -p /srv/fdroid/repo \
     /app
 
 # Copy files
-COPY update_checker.py init_repo.py /app/
+COPY update_checker.py init_repo.py config_ui.py /app/
 COPY nginx.conf /etc/nginx/sites-available/default
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
