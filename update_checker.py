@@ -183,7 +183,7 @@ class FDroidUpdater:
         
         try:
             logger.info(f"Downloading {filename}...")
-            response = requests.get(url, stream=True, timeout=300)
+            response = requests.get(url, headers=self.headers, stream=True, timeout=300)
             response.raise_for_status()
             
             with open(filepath, 'wb') as f:
