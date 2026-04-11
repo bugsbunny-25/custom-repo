@@ -57,7 +57,7 @@ class FDroidUpdater:
         # Set up GitHub API headers
         self.headers = {'Accept': 'application/vnd.github.v3+json'}
         if self.config.get('github_token'):
-            self.headers['Authorization'] = f"token {self.config['github_token']}"
+            self.headers['Authorization'] = f"Bearer {self.config['github_token']}"
 
         # Parse repo configurations
         self.repos = self._parse_repo_configs()
@@ -177,13 +177,18 @@ class FDroidUpdater:
             logger.error(f"Error fetching releases for {repo_name}: {e}")
             return []
     
-    def _download_apk(self, url, filename):
+    def _download_apk(self, repo_name, asset_id, filename):
         """Download an APK file"""
         filepath = self.repo_dir / filename
         
         try:
             logger.info(f"Downloading {filename}...")
-            response = requests.get(url, headers=self.headers, stream=True, timeout=300)
+            download_headers = {
+                'Accept': 'application/octet-stream',
+                'Authorization': self.headers.get('Authorization', '')
+            }
+            url = f"https://api.github.com/repos/{repo_name}/assets/{asset_id}"
+            response = requests.get(url, headers=download_headers, stream=True, timeout=300)
             response.raise_for_status()
             
             with open(filepath, 'wb') as f:
@@ -298,9 +303,9 @@ class FDroidUpdater:
                     downloaded_count = 0
                     for asset in apk_assets:
                         asset_name = asset['name']
-                        download_url = asset['browser_download_url']
+                        asset_id = asset['id']
                         
-                        if self._download_apk(download_url, f"{release_id}-{asset_name}"):
+                        if self._download_apk(repo_name, asset_id, f"{release_id}-{asset_name}"):
                             downloaded_count += 1
                             updated = True
                     
