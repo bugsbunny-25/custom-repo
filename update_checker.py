@@ -187,7 +187,7 @@ class FDroidUpdater:
                 'Accept': 'application/octet-stream',
                 'Authorization': self.headers.get('Authorization', '')
             }
-            url = f"https://api.github.com/repos/{repo_name}/assets/{asset_id}"
+            url = f"https://api.github.com/repos/{repo_name}/releases/assets/{asset_id}"
             response = requests.get(url, headers=download_headers, stream=True, timeout=300)
             response.raise_for_status()
             
