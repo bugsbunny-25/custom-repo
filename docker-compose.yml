@@ -21,6 +21,9 @@ services:
 
     environment:
       - TZ=UTC
+      # Root log level for the app (logback.xml reads this, defaulting to
+      # INFO if unset). One of ERROR, WARN, INFO, DEBUG, TRACE.
+      - LOG_LEVEL=INFO
       # Override for a different DB directory; defaults to /app/db (the
       # app.db file is created inside it automatically if missing)
       # - DB_PATH=/app/db

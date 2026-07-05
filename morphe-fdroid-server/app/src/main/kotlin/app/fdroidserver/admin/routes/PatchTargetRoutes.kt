@@ -25,6 +25,9 @@ data class AttachmentOkResponse(val ok: Boolean = true, val attachment: AppConfi
 @Serializable
 data class RunResponse(val ok: Boolean = true, val updated: Boolean)
 
+@Serializable
+data class RunVersionPayload(val version: String, val versionPageUrl: String)
+
 /** The Patching tab's "Patched Apps" API - CRUD on patch targets plus
  * attach/detach of library patches, matching the Python version's
  * `/api/patch-targets*` routes exactly. */
@@ -43,6 +46,27 @@ fun Route.patchTargetRoutes(appConfig: AppConfig, patchScheduler: PatchScheduler
             return@post
         }
         val updated = patchScheduler.runTargetNow(id)
+        call.respond(RunResponse(updated = updated))
+    }
+
+    // "Patch specific version" button - patches a target at a user-pasted
+    // APKMirror version page URL (and user-typed version string, since
+    // version formats vary too much across apps to reliably scrape) with
+    // every attached patch, bypassing the normal version-listing/matching so
+    // it works even for versions the target's app-listing page hasn't
+    // surfaced or that don't match any attachment's supported_versions.
+    post("/api/patch-targets/{id}/run-version") {
+        val id = call.parameters["id"]
+        if (id == null) {
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid patch target id"))
+            return@post
+        }
+        val payload = call.receive<RunVersionPayload>()
+        if (payload.version.isBlank() || payload.versionPageUrl.isBlank()) {
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("version and versionPageUrl are required"))
+            return@post
+        }
+        val updated = patchScheduler.runSpecificVersion(id, payload.version, payload.versionPageUrl)
         call.respond(RunResponse(updated = updated))
     }
 

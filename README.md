@@ -232,6 +232,17 @@ before running the patcher — no shell flags involved.
    merges (if it's a bundle), patches, signs, and updates the
    `/patched/repo` index.
 
+5. To patch one specific version right away instead of waiting on the
+   scheduler, use a patch target's **"Patch Specific Version"** button and
+   fill in the version number and the APKMirror **version page** URL (not the
+   app's general listing page). The version number is typed in rather than
+   scraped off the page, since APKMirror version strings don't follow one
+   consistent format across apps (dates, build numbers, "beta"/"rc" suffixes,
+   etc.). It downloads and patches that version with every patch attached to
+   the target, regardless of the attachments' configured
+   `supported_versions` — this is treated as an explicit request that
+   overrides the normal version matching.
+
 ### Caveats
 
 - **APKMirror has no official API.** New versions are discovered by scraping
