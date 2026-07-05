@@ -50,8 +50,6 @@ fun main() {
     val appConfig = AppConfig(database)
 
     val fdroidRepoManager = FdroidRepoManager()
-    fdroidRepoManager.initRepo(repoDir)
-    fdroidRepoManager.initRepo(patchedRepoDir)
 
     val patchLibrary = PatchLibrary()
 
@@ -74,6 +72,15 @@ fun main() {
     runBlocking {
         val rootJob = coroutineContext[Job]!!
 
+        // Run off the main/admin-server thread and with a bounded timeout
+        // (see FdroidRepoManager.runFdroid) so a stalled `fdroid init` (e.g.
+        // waiting on entropy for keystore generation) can never prevent the
+        // admin server above from starting or from serving requests.
+        val initRepoJob = launch {
+            fdroidRepoManager.initRepo(repoDir)
+            fdroidRepoManager.initRepo(patchedRepoDir)
+        }
+
         // `docker stop`/SIGTERM otherwise just kills the process mid-`join()`
         // - stop accepting admin requests and cancel the scheduler loops so
         // the JVM can exit on its own instead of being force-killed after
@@ -88,6 +95,11 @@ fun main() {
         )
 
         try {
+            // Wait for repo init (bounded by FdroidRepoManager's own timeout,
+            // so this can't hang) before reading repoDir's config.yml below -
+            // the admin server is already serving requests regardless.
+            initRepoJob.join()
+
             // If the DB hasn't been set up yet but repoDir's own config.yml
             // already has repo_name/repo_description/repo_url filled in (e.g. a
             // pre-existing fdroid-data volume from before the SQLite-backed

@@ -105,9 +105,18 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
                 .directory(workingDir)
                 .redirectErrorStream(true)
                 .start()
+            // Close stdin immediately: `fdroid` can otherwise block waiting on
+            // an interactive prompt (e.g. keystore setup) that will never be
+            // answered in this non-interactive/containerized context.
+            process.outputStream.close()
             val output = process.inputStream.bufferedReader().readText()
-            val exitCode = process.waitFor()
-            exitCode to output
+            val finished = process.waitFor(FDROID_TIMEOUT_MINUTES, java.util.concurrent.TimeUnit.MINUTES)
+            if (!finished) {
+                logger.error("Timed out after $FDROID_TIMEOUT_MINUTES minutes running fdroid ${args.joinToString(" ")} in $workingDir - killing process")
+                process.destroyForcibly()
+                return -1 to "Timed out waiting for fdroid ${args.joinToString(" ")}"
+            }
+            process.exitValue() to output
         } catch (e: Exception) {
             logger.error("Error running fdroid ${args.joinToString(" ")} in $workingDir: $e")
             -1 to (e.message ?: e.toString())
@@ -137,6 +146,8 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
     }
 
     companion object {
+        private const val FDROID_TIMEOUT_MINUTES = 5L
+
         /**
          * Derives each F-Droid repo's `repo_url` from the single base URL
          * collected during setup - F-Droid requires `repo_url` to point
