@@ -327,6 +327,18 @@
           </div>
 
           <div class="settings-section">
+            <h3>APKMirror patching</h3>
+            <div class="field">
+              <label for="settingsFlareSolverrUrl">FlareSolverr URL (optional)</label>
+              <input id="settingsFlareSolverrUrl" type="text" placeholder="http://flaresolverr:8191/v1" />
+              <p class="hint">
+                Fallback for Cloudflare challenges scraping APKMirror. Only used if it's a
+                valid http(s) URL - leave blank to disable.
+              </p>
+            </div>
+          </div>
+
+          <div class="settings-section">
             <h3>Defaults for new GitHub repos</h3>
             <label class="check"><input id="settingsDefaultIncludePrereleases" type="checkbox" /> Include pre-releases</label>
             <label class="check"><input id="settingsDefaultIncludeDrafts" type="checkbox" /> Include drafts</label>
@@ -1370,6 +1382,7 @@
       document.getElementById('settingsApkPattern').value = s.apk_pattern || '';
       document.getElementById('settingsMaxVersionsPerApp').value = s.max_versions_per_app;
       document.getElementById('settingsLogLevel').value = s.log_level || '';
+      document.getElementById('settingsFlareSolverrUrl').value = s.flare_solverr_url || '';
       document.getElementById('settingsDefaultIncludePrereleases').checked = s.default_include_prereleases;
       document.getElementById('settingsDefaultIncludeDrafts').checked = s.default_include_drafts;
       document.getElementById('settingsDefaultEnabled').checked = s.default_enabled;
@@ -1391,6 +1404,7 @@
         apk_pattern: document.getElementById('settingsApkPattern').value,
         max_versions_per_app: Number(document.getElementById('settingsMaxVersionsPerApp').value),
         log_level: document.getElementById('settingsLogLevel').value.trim(),
+        flare_solverr_url: document.getElementById('settingsFlareSolverrUrl').value.trim(),
         default_include_prereleases: document.getElementById('settingsDefaultIncludePrereleases').checked,
         default_include_drafts: document.getElementById('settingsDefaultIncludeDrafts').checked,
         default_enabled: document.getElementById('settingsDefaultEnabled').checked,

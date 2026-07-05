@@ -3,6 +3,8 @@ package app.fdroidserver.apkmirror
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.jsoup.Jsoup
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -216,7 +218,10 @@ class ApkMirrorClientTest {
     fun `gives up after repeated Cloudflare challenges with a clear error`() {
         val server = startFeedServer(feed = listOf(FakeResponse(200, cloudflareChallengeBody)))
         try {
-            val client = ApkMirrorClient()
+            // Explicit null rather than relying on FLARESOLVERR_URL being
+            // unset in whatever environment runs this test - this test is
+            // specifically about the no-fallback-configured path.
+            val client = ApkMirrorClient(flareSolverrUrl = null)
             val exception = assertThrows(IllegalStateException::class.java) {
                 client.getVersions("http://127.0.0.1:${server.address.port}/apk/disney/disney")
             }
@@ -306,5 +311,117 @@ class ApkMirrorClientTest {
         } finally {
             server.stop(0)
         }
+    }
+
+    // --- FlareSolverr fallback -----------------------------------------------
+    //
+    // FlareSolverr runs as its own sidecar service (see docker-compose.yml),
+    // reached over HTTP - faked here with a second throwaway HttpServer
+    // playing its /v1 endpoint, separate from the fake APKMirror server.
+
+    private fun startFlareSolverrServer(responseJson: (requestBody: String) -> String): HttpServer {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/v1") { exchange ->
+            val requestBody = exchange.requestBody.bufferedReader().readText()
+            val bytes = responseJson(requestBody).toByteArray()
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        return server
+    }
+
+    @Test
+    fun `falls back to FlareSolverr when persistently challenged, and its cookies clear the challenge on later requests`() {
+        val feedHost = "127.0.0.1"
+        var flareSolverrRequests = 0
+        val flareSolverr = startFlareSolverrServer { requestBody ->
+            flareSolverrRequests++
+            assertTrue(requestBody.contains(""""cmd":"request.get""""))
+            val encodedFeedXml = Json.encodeToString(disneyFeedXml)
+            """{"status":"ok","solution":{"response":$encodedFeedXml,"cookies":[""" +
+                """{"name":"cf_clearance","value":"solved-token","domain":"$feedHost","path":"/"}]}}"""
+        }
+
+        val apkMirror = HttpServer.create(InetSocketAddress(feedHost, 0), 0)
+        apkMirror.createContext("/") { exchange ->
+            val bytes = if (exchange.requestURI.path.endsWith("/feed/")) {
+                val cookie = exchange.requestHeaders.getFirst("Cookie").orEmpty()
+                if (cookie.contains("cf_clearance=solved-token")) disneyFeedXml.toByteArray() else cloudflareChallengeBody.toByteArray()
+            } else {
+                "<html>app page</html>".toByteArray()
+            }
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        apkMirror.start()
+
+        try {
+            val appUrl = "http://$feedHost:${apkMirror.address.port}/apk/disney/disney"
+            val client = ApkMirrorClient(flareSolverrUrl = "http://$feedHost:${flareSolverr.address.port}/v1")
+
+            val firstCall = client.getVersions(appUrl)
+            assertEquals("26.11.0+rc3-2026.06.24", firstCall.first().version)
+            assertEquals(1, flareSolverrRequests)
+
+            // cookieManager already holds the cookie FlareSolverr returned, so
+            // the feed request should pass on its own this time - confirming
+            // the merge actually benefits later requests, not just this one.
+            val secondCall = client.getVersions(appUrl)
+            assertEquals("26.11.0+rc3-2026.06.24", secondCall.first().version)
+            assertEquals(1, flareSolverrRequests)
+        } finally {
+            apkMirror.stop(0)
+            flareSolverr.stop(0)
+        }
+    }
+
+    @Test
+    fun `raises the original challenge error, noting the FlareSolverr fallback also failed, when FlareSolverr can't solve it either`() {
+        val flareSolverr = startFlareSolverrServer { """{"status":"error","message":"could not solve"}""" }
+        val server = startFeedServer(feed = listOf(FakeResponse(200, cloudflareChallengeBody)))
+        try {
+            val client = ApkMirrorClient(flareSolverrUrl = "http://127.0.0.1:${flareSolverr.address.port}/v1")
+            val exception = assertThrows(IllegalStateException::class.java) {
+                client.getVersions("http://127.0.0.1:${server.address.port}/apk/disney/disney")
+            }
+            assertTrue(exception.message.orEmpty().contains("FlareSolverr fallback also failed"))
+        } finally {
+            server.stop(0)
+            flareSolverr.stop(0)
+        }
+    }
+
+    // --- FlareSolverr URL validation ------------------------------------------
+    //
+    // flareSolverrUrl is sourced from the admin UI's Settings page (a plain
+    // text field saved to the DB), not a Docker env var - these guard against
+    // whatever a user might type in there.
+
+    @Test
+    fun `accepts a plain http and https FlareSolverr URL`() {
+        assertTrue(ApkMirrorClient.isValidFlareSolverrUrl("http://flaresolverr:8191/v1"))
+        assertTrue(ApkMirrorClient.isValidFlareSolverrUrl("https://flaresolverr.example.com/v1"))
+    }
+
+    @Test
+    fun `rejects a blank, schemeless, or non-http FlareSolverr URL`() {
+        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl(""))
+        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl("   "))
+        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl("flaresolverr:8191/v1"))
+        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl("not a url"))
+        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl("ftp://flaresolverr:8191/v1"))
+    }
+
+    @Test
+    fun `the flareSolverrUrl property discards an invalid value instead of storing it`() {
+        val client = ApkMirrorClient(flareSolverrUrl = "not a url")
+        assertNull(client.flareSolverrUrl)
+
+        client.flareSolverrUrl = "http://flaresolverr:8191/v1"
+        assertEquals("http://flaresolverr:8191/v1", client.flareSolverrUrl)
+
+        client.flareSolverrUrl = "garbage"
+        assertNull(client.flareSolverrUrl)
     }
 }

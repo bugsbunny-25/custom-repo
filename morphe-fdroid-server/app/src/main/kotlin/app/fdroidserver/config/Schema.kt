@@ -30,6 +30,7 @@ object Settings : Table("settings") {
     val apkPattern = varchar("apk_pattern", 255).default(""".*\.apk$""")
     val maxVersionsPerApp = integer("max_versions_per_app").default(0)
     val logLevel = varchar("log_level", 32).default("INFO")
+    val flareSolverrUrl = varchar("flare_solverr_url", 512).default("")
     val defaultIncludePrereleases = bool("default_include_prereleases").default(true)
     val defaultIncludeDrafts = bool("default_include_drafts").default(false)
     val defaultMaxReleases = integer("default_max_releases").default(5)

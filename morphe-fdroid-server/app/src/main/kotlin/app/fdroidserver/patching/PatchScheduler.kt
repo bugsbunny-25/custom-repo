@@ -36,6 +36,7 @@ class PatchScheduler(
     private val logger: Logger = LoggerFactory.getLogger(PatchScheduler::class.java.name),
 ) {
     suspend fun checkForUpdates(): Boolean {
+        refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById()
         val targets = appConfig.listEnabledPatchTargets()
 
@@ -49,11 +50,24 @@ class PatchScheduler(
         return anyUpdated
     }
 
+    /** Pulls the current FlareSolverr URL out of Settings and hands it to
+     * [apkMirrorClient] - it's stored/edited in the DB via the admin UI's
+     * Settings page rather than a Docker env var, so re-reading it at the
+     * start of each entry point (rather than once at startup) is what lets a
+     * value changed in Settings take effect on the very next run.
+     * [ApkMirrorClient.flareSolverrUrl]'s own setter discards anything that
+     * doesn't look like a usable http(s) URL, so a blank/malformed setting
+     * just disables the fallback rather than misbehaving. */
+    private suspend fun refreshFlareSolverrUrl() {
+        apkMirrorClient.flareSolverrUrl = appConfig.getSettings().flareSolverrUrl
+    }
+
     /** Runs the patching pipeline for a single enabled target, identified by
      * [targetId] - used by the admin UI's "Patch now" button, as opposed to
      * [checkForUpdates]'s scheduled sweep over every enabled target. Returns
      * whether a new patched version was published. */
     suspend fun runTargetNow(targetId: String): Boolean {
+        refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById()
         val target = appConfig.listEnabledPatchTargets().firstOrNull { it.id == targetId }
         if (target == null) {
@@ -77,6 +91,7 @@ class PatchScheduler(
      * pattern (dates, build hashes, "beta"/"rc" suffixes, etc.) that a regex
      * could extract for every app. Returns whether anything was published. */
     suspend fun runSpecificVersion(targetId: String, version: String, versionPageUrl: String): Boolean {
+        refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById()
         val target = appConfig.listEnabledPatchTargets().firstOrNull { it.id == targetId }
         if (target == null) {

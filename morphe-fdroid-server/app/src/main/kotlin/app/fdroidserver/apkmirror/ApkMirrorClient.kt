@@ -1,11 +1,15 @@
 package app.fdroidserver.apkmirror
 
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.parser.Parser
 import java.io.File
 import java.net.CookieManager
 import java.net.CookiePolicy
+import java.net.HttpCookie
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -29,10 +33,38 @@ import org.slf4j.LoggerFactory
  * fallbacks are inherently fragile (break whenever APKMirror changes its
  * markup) and scraping is against APKMirror's Terms of Service - use at your
  * own risk (same caveat as the Python version carried).
+ *
+ * When a Cloudflare challenge outlasts [get]'s own retries, and a
+ * FlareSolverr instance is configured via [flareSolverrUrl], falls back to
+ * it as a last resort: FlareSolverr drives a real headless browser that can
+ * actually execute the challenge's JS, then hands back the solved page plus
+ * the session cookies (`cf_clearance` etc.) it earned. Those cookies get
+ * merged into [cookieManager], so it isn't just that one request that
+ * benefits - every subsequent request in this client (feed, variant,
+ * download pages, the APK download itself) reuses the same cookie jar.
+ *
+ * [flareSolverrUrl] is a `var`, not fixed at construction, because it's
+ * meant to be sourced from the admin UI's Settings page (stored in the DB
+ * via `AppConfig`/`Schema.Settings.flareSolverrUrl`) rather than a Docker
+ * env var - `PatchScheduler` re-reads the current setting and assigns it
+ * here before each patch-check sweep, so a value changed in Settings takes
+ * effect on the next run without restarting the app.
  */
-class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMirrorClient::class.java.name)) {
+class ApkMirrorClient(
+    private val logger: Logger = LoggerFactory.getLogger(ApkMirrorClient::class.java.name),
+    flareSolverrUrl: String? = null,
+) {
 
     data class VersionEntry(val version: String, val pageUrl: String)
+
+    /** Only ever holds a value [isValidFlareSolverrUrl] would accept for a
+     * FlareSolverr endpoint - assigning a blank or malformed value disables
+     * the fallback (stores null) rather than failing later with a confusing
+     * "couldn't connect"-style error from a URL that was never going to work. */
+    var flareSolverrUrl: String? = flareSolverrUrl?.trim()?.takeIf { isValidFlareSolverrUrl(it) }
+        set(value) {
+            field = value?.trim()?.takeIf { isValidFlareSolverrUrl(it) }
+        }
 
     // APKMirror is fronted by Cloudflare, which gates the final asset link on
     // both a browser-like header set *and* the session cookies handed out
@@ -67,10 +99,11 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
      * earlier, so it reads as rate-limiting/heuristic bot-scoring rather than
      * a hard per-URL block). A plain HTTP client can't execute the
      * challenge's JS/proof-of-work, so retrying can't force a pass the way a
-     * real browser would - but backing off and trying again a few times
-     * recovers the transient cases, and failing that we raise a distinct,
-     * actionable error instead of quietly returning (or worse, parsing) the
-     * interstitial HTML as if it were the real page.
+     * real browser would - once retries are exhausted, [solveWithFlareSolverr]
+     * is tried as a last resort if configured; only if that also comes up
+     * empty do we raise a distinct, actionable error instead of quietly
+     * returning (or worse, parsing) the interstitial HTML as if it were the
+     * real page.
      */
     private fun get(url: String, referer: String? = null): String {
         lateinit var response: HttpResponse<String>
@@ -79,7 +112,10 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
             if (!isCloudflareChallenge(response)) break
             if (attempt == MAX_FETCH_ATTEMPTS) {
-                error("apkmirror: blocked by a Cloudflare challenge fetching $url after $MAX_FETCH_ATTEMPTS attempts")
+                return solveWithFlareSolverr(url) ?: error(
+                    "apkmirror: blocked by a Cloudflare challenge fetching $url after $MAX_FETCH_ATTEMPTS attempts" +
+                        if (flareSolverrUrl == null) "" else " (FlareSolverr fallback also failed)",
+                )
             }
             logger.warn("apkmirror: Cloudflare challenge fetching $url (attempt $attempt/$MAX_FETCH_ATTEMPTS), retrying")
             Thread.sleep(challengeRetryDelayMs(attempt, response))
@@ -112,6 +148,97 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
 
         val backoff = BASE_RETRY_DELAY_MS * (1L shl (attempt - 1))
         return backoff.coerceAtMost(MAX_RETRY_DELAY_MS) + Random.nextLong(JITTER_MS)
+    }
+
+    @Serializable
+    private data class FlareSolverrRequest(val cmd: String, val url: String, val maxTimeout: Int)
+
+    @Serializable
+    private data class FlareSolverrResponse(val status: String, val message: String = "", val solution: FlareSolverrSolution? = null)
+
+    @Serializable
+    private data class FlareSolverrSolution(val response: String, val cookies: List<FlareSolverrCookie> = emptyList())
+
+    @Serializable
+    private data class FlareSolverrCookie(
+        val name: String,
+        val value: String,
+        val domain: String,
+        val path: String = "/",
+        val secure: Boolean = false,
+        @SerialName("httpOnly") val httpOnly: Boolean = false,
+    )
+
+    private val flareSolverrJson = Json { ignoreUnknownKeys = true }
+
+    /**
+     * Last-resort fallback for [get] once its own retries are exhausted:
+     * asks FlareSolverr (a sidecar that drives a real headless browser
+     * specifically to clear Cloudflare challenges) to fetch [url] itself.
+     * Returns null - rather than throwing - on any failure (not configured,
+     * unreachable, couldn't solve it) so [get] can fall back to its normal
+     * "still challenged" error instead of a confusing FlareSolverr-shaped
+     * one.
+     *
+     * The solved page's cookies (typically including a fresh `cf_clearance`)
+     * are merged into [cookieManager] before returning, so it's not just
+     * this one response that benefits - every later request through this
+     * client reuses the same jar. FlareSolverr's own request isn't retried;
+     * if it fails, the normal retry loop in [get] will simply hit it again
+     * next time [get] is called.
+     */
+    private fun solveWithFlareSolverr(url: String): String? {
+        val endpoint = flareSolverrUrl ?: return null
+        return try {
+            logger.info("apkmirror: still challenged after $MAX_FETCH_ATTEMPTS attempts, falling back to FlareSolverr for $url")
+            val requestBody = flareSolverrJson.encodeToString(
+                FlareSolverrRequest.serializer(),
+                FlareSolverrRequest(cmd = "request.get", url = url, maxTimeout = FLARESOLVERR_TIMEOUT_MS),
+            )
+            val request = HttpRequest.newBuilder(URI.create(endpoint))
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofMillis(FLARESOLVERR_TIMEOUT_MS + 10_000L))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build()
+            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+            if (response.statusCode() !in 200..299) {
+                logger.warn("apkmirror: FlareSolverr returned HTTP ${response.statusCode()} for $url")
+                return null
+            }
+
+            val parsed = flareSolverrJson.decodeFromString(FlareSolverrResponse.serializer(), response.body())
+            val solution = parsed.solution
+            if (parsed.status != "ok" || solution == null) {
+                logger.warn("apkmirror: FlareSolverr couldn't solve the challenge for $url: ${parsed.message}")
+                return null
+            }
+
+            mergeFlareSolverrCookies(solution.cookies)
+            logger.info("apkmirror: FlareSolverr solved the challenge for $url")
+            solution.response
+        } catch (e: Exception) {
+            logger.warn("apkmirror: FlareSolverr fallback failed for $url: $e")
+            null
+        }
+    }
+
+    private fun mergeFlareSolverrCookies(cookies: List<FlareSolverrCookie>) {
+        for (cookie in cookies) {
+            val domain = cookie.domain.removePrefix(".")
+            val httpCookie = HttpCookie(cookie.name, cookie.value).apply {
+                this.domain = domain
+                path = cookie.path
+                secure = cookie.secure
+                isHttpOnly = cookie.httpOnly
+                // HttpCookie defaults to RFC 2965 (version 1), which sends
+                // Cookie: name="value";$Path="...";$Domain="..." - APKMirror
+                // (like most servers) expects the plain Netscape-style
+                // name=value pair instead, so it'd otherwise silently ignore
+                // this cookie on the next request.
+                version = 0
+            }
+            cookieManager.cookieStore.add(URI("https://$domain${cookie.path}"), httpCookie)
+        }
     }
 
     private fun parse(html: String, baseUrl: String): Document = Jsoup.parse(html, baseUrl)
@@ -296,6 +423,16 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+        /** A FlareSolverr URL is only usable if it parses as an absolute
+         * http(s) URL with a host - guards the [flareSolverrUrl] setter
+         * against a blank/malformed value saved in Settings, so a typo
+         * there disables the fallback instead of being sent as a request
+         * target and failing in a more confusing way. */
+        internal fun isValidFlareSolverrUrl(url: String): Boolean {
+            val uri = runCatching { URI(url) }.getOrNull() ?: return false
+            return uri.isAbsolute && (uri.scheme == "http" || uri.scheme == "https") && !uri.host.isNullOrBlank()
+        }
+
         private val CHANNEL_TITLE_RE = Regex("""^Download (.+) APKs for Android - APKMirror$""")
 
         // Matches Cloudflare's "Just a moment..." managed-challenge interstitial,
@@ -307,5 +444,10 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
         private const val BASE_RETRY_DELAY_MS = 1_500L
         private const val MAX_RETRY_DELAY_MS = 8_000L
         private const val JITTER_MS = 750L
+
+        // How long FlareSolverr itself is allowed to spend solving a single
+        // challenge (its own internal timeout, in ms) - a real headless
+        // browser navigation is much slower than our own HTTP requests.
+        private const val FLARESOLVERR_TIMEOUT_MS = 60_000
     }
 }

@@ -54,6 +54,7 @@ class AppConfig(private val db: AppDatabase) {
         val apkPattern: String,
         val maxVersionsPerApp: Int,
         val logLevel: String,
+        val flareSolverrUrl: String,
         val defaultIncludePrereleases: Boolean,
         val defaultIncludeDrafts: Boolean,
         val defaultMaxReleases: Int,
@@ -74,6 +75,7 @@ class AppConfig(private val db: AppDatabase) {
             apkPattern = row[Settings.apkPattern],
             maxVersionsPerApp = row[Settings.maxVersionsPerApp],
             logLevel = row[Settings.logLevel],
+            flareSolverrUrl = row[Settings.flareSolverrUrl],
             defaultIncludePrereleases = row[Settings.defaultIncludePrereleases],
             defaultIncludeDrafts = row[Settings.defaultIncludeDrafts],
             defaultMaxReleases = row[Settings.defaultMaxReleases],
@@ -130,6 +132,7 @@ class AppConfig(private val db: AppDatabase) {
         val apkPattern: String? = null,
         val maxVersionsPerApp: Int? = null,
         val logLevel: String? = null,
+        val flareSolverrUrl: String? = null,
         val defaultIncludePrereleases: Boolean? = null,
         val defaultIncludeDrafts: Boolean? = null,
         val defaultMaxReleases: Int? = null,
@@ -147,6 +150,7 @@ class AppConfig(private val db: AppDatabase) {
             payload.apkPattern?.let { v -> it[apkPattern] = v }
             payload.maxVersionsPerApp?.let { v -> it[maxVersionsPerApp] = v }
             payload.logLevel?.let { v -> it[logLevel] = v }
+            payload.flareSolverrUrl?.let { v -> it[flareSolverrUrl] = v }
             payload.defaultIncludePrereleases?.let { v -> it[defaultIncludePrereleases] = v }
             payload.defaultIncludeDrafts?.let { v -> it[defaultIncludeDrafts] = v }
             payload.defaultMaxReleases?.let { v -> it[defaultMaxReleases] = v }
