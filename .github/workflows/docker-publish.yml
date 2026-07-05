@@ -48,6 +48,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Buildx attaches provenance/SBOM attestations by default, each
+          # pushed as its own manifest referenced by digest (sha256-<digest>)
+          # rather than by the tags above - disable both so GHCR's tag list
+          # only shows the tags metadata-action actually generated.
+          provenance: false
+          sbom: false
           # morphe-patcher is resolved from GitHub Packages at build time,
           # which requires authentication even for public packages - reuse
           # this workflow's own token (any authenticated account can read a
