@@ -73,8 +73,10 @@ object GithubCheckedReleases : Table("github_checked_releases") {
     }
 }
 
-/** Reusable library of uploaded `.mpp` patch files. */
-object PatchLibraryTable : Table("patch_library") {
+/** Reusable library of uploaded `.mpp` patch files. Base class so the
+ * "Patched" and "Patched TV" tabs (see [PatchSchema]) each get their own
+ * table/data with zero duplicated column definitions. */
+open class PatchLibrarySchema(name: String) : Table(name) {
     val id = varchar("id", 255)
     val name = varchar("name", 255).default("")
     val file = varchar("file", 255).default("")
@@ -83,9 +85,11 @@ object PatchLibraryTable : Table("patch_library") {
 
     override val primaryKey = PrimaryKey(id)
 }
+object PatchLibraryTable : PatchLibrarySchema("patch_library")
+object PatchLibraryTableTv : PatchLibrarySchema("patch_library_tv")
 
 /** Apps watched on APKMirror for patching. */
-object PatchTargets : Table("patch_targets") {
+open class PatchTargetsSchema(name: String) : Table(name) {
     val id = varchar("id", 255)
     val name = varchar("name", 255).default("")
     val apkmirrorUrl = varchar("apkmirror_url", 512).default("")
@@ -94,16 +98,22 @@ object PatchTargets : Table("patch_targets") {
 
     override val primaryKey = PrimaryKey(id)
 }
+object PatchTargets : PatchTargetsSchema("patch_targets")
+object PatchTargetsTv : PatchTargetsSchema("patch_targets_tv")
 
 /** Attaches a library patch to a target app, with app-specific overrides.
  * `patchSelectionJson`/`optionOverridesJson` store the nested
  * sub-patch-name -> bool / option-key -> value maps as JSON text rather than
  * further junction tables, since they're opaque blobs read/written as a
  * whole and never queried by their inner keys. */
-object PatchAttachments : Table("patch_attachments") {
+open class PatchAttachmentsSchema(
+    name: String,
+    targets: PatchTargetsSchema,
+    library: PatchLibrarySchema,
+) : Table(name) {
     val id = integer("id").autoIncrement()
-    val targetId = varchar("target_id", 255).references(PatchTargets.id, onDelete = ReferenceOption.CASCADE)
-    val patchId = varchar("patch_id", 255).references(PatchLibraryTable.id, onDelete = ReferenceOption.CASCADE)
+    val targetId = varchar("target_id", 255).references(targets.id, onDelete = ReferenceOption.CASCADE)
+    val patchId = varchar("patch_id", 255).references(library.id, onDelete = ReferenceOption.CASCADE)
     val supportedVersions = text("supported_versions").default("")
     val patchArgs = text("patch_args").default("")
     val patchSelectionJson = text("patch_selection_json").default("{}")
@@ -116,12 +126,14 @@ object PatchAttachments : Table("patch_attachments") {
         uniqueIndex(targetId, patchId)
     }
 }
+object PatchAttachments : PatchAttachmentsSchema("patch_attachments", PatchTargets, PatchLibraryTable)
+object PatchAttachmentsTv : PatchAttachmentsSchema("patch_attachments_tv", PatchTargetsTv, PatchLibraryTableTv)
 
 /** Per-target history of already-processed (version, patch) pairs (replaces
  * `patch_cache.json`'s `{targetId}.processed` map). */
-object PatchCheckedEntries : Table("patch_checked_entries") {
+open class PatchCheckedEntriesSchema(name: String, targets: PatchTargetsSchema) : Table(name) {
     val id = integer("id").autoIncrement()
-    val targetId = varchar("target_id", 255).references(PatchTargets.id, onDelete = ReferenceOption.CASCADE)
+    val targetId = varchar("target_id", 255).references(targets.id, onDelete = ReferenceOption.CASCADE)
     val cacheKey = varchar("cache_key", 255)
     val version = varchar("version", 128).default("")
     val patchId = varchar("patch_id", 255).default("")
@@ -135,3 +147,5 @@ object PatchCheckedEntries : Table("patch_checked_entries") {
         uniqueIndex(targetId, cacheKey)
     }
 }
+object PatchCheckedEntries : PatchCheckedEntriesSchema("patch_checked_entries", PatchTargets)
+object PatchCheckedEntriesTv : PatchCheckedEntriesSchema("patch_checked_entries_tv", PatchTargetsTv)

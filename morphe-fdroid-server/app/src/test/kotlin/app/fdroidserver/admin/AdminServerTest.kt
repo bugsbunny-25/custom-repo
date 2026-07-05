@@ -38,15 +38,28 @@ class AdminServerTest {
     private fun server(tempDir: File): AdminServer {
         val appConfig = AppConfig(AppDatabase(File(tempDir, "db").apply { mkdirs() }))
         val patchesDir = File(tempDir, "patches").apply { mkdirs() }
+        val patchesTvDir = File(tempDir, "patches-tv").apply { mkdirs() }
         val repoDir = File(tempDir, "repo").apply { mkdirs() }
         val patchedRepoDir = File(tempDir, "patched-repo").apply { mkdirs() }
+        val patchedTvRepoDir = File(tempDir, "patched-tv-repo").apply { mkdirs() }
         val fdroidRepoManager = FdroidRepoManager()
+        val tmpDir = File(tempDir, "tmp").apply { mkdirs() }
         val patchScheduler = PatchScheduler(
             appConfig, ApkMirrorClient(), PatchLibrary(), BundleMerger(), PatchApplier(),
-            patchesDir, patchedRepoDir, File(tempDir, "tmp").apply { mkdirs() }, fdroidRepoManager,
+            patchesDir, patchedRepoDir, tmpDir, fdroidRepoManager,
             PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-keystore.jks")),
+            schema = AppConfig.PatchSchemas.Mobile,
         )
-        return AdminServer(appConfig, PatchLibrary(), patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler)
+        val patchSchedulerTv = PatchScheduler(
+            appConfig, ApkMirrorClient(), PatchLibrary(), BundleMerger(), PatchApplier(),
+            patchesTvDir, patchedTvRepoDir, tmpDir, fdroidRepoManager,
+            PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-tv-keystore.jks")),
+            schema = AppConfig.PatchSchemas.Tv,
+        )
+        return AdminServer(
+            appConfig, PatchLibrary(), patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler,
+            patchesTvDir, patchedTvRepoDir, patchSchedulerTv,
+        )
     }
 
     @Test

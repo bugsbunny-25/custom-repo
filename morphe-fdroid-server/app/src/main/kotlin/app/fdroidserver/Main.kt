@@ -41,8 +41,10 @@ fun main() {
     val dbDir = File(System.getenv("DB_PATH") ?: "/app/db")
     val repoDir = File(System.getenv("REPO_PATH") ?: "/srv/fdroid")
     val patchedRepoDir = File(repoDir.absolutePath + "/patched")
+    val patchedTvRepoDir = File(repoDir.absolutePath + "/patched-tv")
     val tmpDir = File(repoDir.absolutePath + "/tmp")
     val defaultPatchesDir = File(repoDir.absolutePath + "/patches")
+    val defaultPatchesTvDir = File(repoDir.absolutePath + "/patches-tv")
 
     tmpDir.mkdirs()
 
@@ -55,17 +57,29 @@ fun main() {
 
     val patchesDir = defaultPatchesDir
     patchesDir.mkdirs()
+    val patchesTvDir = defaultPatchesTvDir
+    patchesTvDir.mkdirs()
 
     val apkMirrorClient = ApkMirrorClient()
     val bundleMerger = BundleMerger()
     val patchApplier = PatchApplier()
     val signing = PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-keystore.jks"))
+    val signingTv = PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-tv-keystore.jks"))
     val patchScheduler = PatchScheduler(
         appConfig, apkMirrorClient, patchLibrary, bundleMerger,
         patchApplier, patchesDir, patchedRepoDir, tmpDir, fdroidRepoManager, signing,
+        schema = AppConfig.PatchSchemas.Mobile,
+    )
+    val patchSchedulerTv = PatchScheduler(
+        appConfig, apkMirrorClient, patchLibrary, bundleMerger,
+        patchApplier, patchesTvDir, patchedTvRepoDir, tmpDir, fdroidRepoManager, signingTv,
+        schema = AppConfig.PatchSchemas.Tv,
     )
 
-    val adminServer = AdminServer(appConfig, patchLibrary, patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler)
+    val adminServer = AdminServer(
+        appConfig, patchLibrary, patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler,
+        patchesTvDir, patchedTvRepoDir, patchSchedulerTv,
+    )
     adminServer.start()
     logger.info("Admin server started on :5001")
 
@@ -79,6 +93,7 @@ fun main() {
         val initRepoJob = launch {
             fdroidRepoManager.initRepo(repoDir)
             fdroidRepoManager.initRepo(patchedRepoDir)
+            fdroidRepoManager.initRepo(patchedTvRepoDir)
         }
 
         // `docker stop`/SIGTERM otherwise just kills the process mid-`join()`
@@ -126,6 +141,10 @@ fun main() {
                             patchedRepoDir, existing.name, existing.description,
                             FdroidRepoManager.patchedRepoUrl(baseUrl), existing.icon,
                         )
+                        fdroidRepoManager.writeRepoMetadata(
+                            patchedTvRepoDir, existing.name, existing.description,
+                            FdroidRepoManager.patchedTvRepoUrl(baseUrl), existing.icon,
+                        )
                     }
                 }
             }
@@ -164,9 +183,17 @@ fun main() {
                         delay(patchInterval)
                     }
                 }
+                val patchTvJob = launch {
+                    while (true) {
+                        runCatching { patchSchedulerTv.checkForUpdates() }
+                            .onFailure { logger.error("Patch TV scheduler error: $it") }
+                        delay(patchInterval)
+                    }
+                }
 
                 githubJob.join()
                 patchJob.join()
+                patchTvJob.join()
             } finally {
                 githubHttpClient.close()
             }

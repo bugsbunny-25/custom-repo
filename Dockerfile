@@ -85,9 +85,11 @@ RUN pip3 install --no-cache-dir fdroidserver --break-system-packages
 
 RUN mkdir -p /srv/fdroid/repo \
     /srv/fdroid/patched/repo \
+    /srv/fdroid/patched-tv/repo \
     /srv/fdroid/metadata \
     /srv/fdroid/tmp \
     /srv/fdroid/patches \
+    /srv/fdroid/patches-tv \
     /app/db
 
 COPY --from=build /build/app/build/libs/*-all.jar /app/app.jar
