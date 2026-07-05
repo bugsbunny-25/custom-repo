@@ -38,7 +38,7 @@ COPY morphe-fdroid-server/ .
 # .github/workflows/docker-publish.yml.
 ARG GITHUB_ACTOR
 ENV GITHUB_ACTOR=${GITHUB_ACTOR}
-RUN --mount=type=secret=id=github_token,env=GITHUB_TOKEN \
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN \
     ./gradlew --no-daemon build -x test
 
 # ---------------------------------------------------------------------------
