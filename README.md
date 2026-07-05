@@ -13,84 +13,61 @@ A Docker-based F-Droid repository server that automatically monitors GitHub rele
 
 ## Quick Start
 
-### 1. Configure Your Repositories
+### 1. Configuration storage
 
-Edit `config.yml` and add your GitHub repositories. You can use either simple or detailed format:
+All configuration lives in a SQLite database (no `config.yml` to hand-edit
+anymore). `DB_PATH` is the *directory* the database lives in - the app
+creates `app.db` inside it automatically if it doesn't exist yet:
 
-**Simple format** (uses global defaults):
-```yaml
-github_repos:
-  - "termux/termux-app"
-  - "mozilla-mobile/fenix"
-```
+- In the Docker image, `DB_PATH` defaults to `/app/db`, and
+  `docker-compose.yml` mounts `${CONFIG_FOLDER}/db` there so it survives
+  container recreation.
+- For local/dev runs outside Docker, set `DB_PATH` to something like `./data`
+  so you don't need the container's `/app` layout.
 
-**Detailed format** (custom settings per repo):
-```yaml
-# Set global defaults
-defaults:
-  include_prereleases: true
-  include_drafts: false
-  max_releases: 5
-  enabled: true
-
-github_repos:
-  # Simple format - uses defaults above
-  - "owner1/standard-app"
-  
-  # Nightly builds repo - check more releases
-  - repo: "nightly-app/android"
-    include_prereleases: true
-    include_drafts: true
-    max_releases: 15
-  
-  # Stable only repo - no betas
-  - repo: "stable-app/android"
-    include_prereleases: false
-    max_releases: 3
-  
-  # Temporarily disabled repo
-  - repo: "archived/old-app"
-    enabled: false
-```
-
-**Real-world example:**
-```yaml
-repo_url: "https://fdroid.yourdomain.com/fdroid"
-github_token: ""  # Optional, for higher API limits
-
-defaults:
-  include_prereleases: true
-  max_releases: 5
-
-github_repos:
-  # Termux - include beta releases
-  - repo: "termux/termux-app"
-    include_prereleases: true
-    max_releases: 3
-  
-  # Signal - stable only
-  - repo: "signalapp/Signal-Android"
-    include_prereleases: false
-    max_releases: 2
-  
-  # Your app - all releases including nightlies
-  - repo: "mycompany/myapp"
-    include_prereleases: true
-    include_drafts: true
-    max_releases: 10
-```
+On first launch, open the admin UI at `/admin` and complete the one-time
+setup form (repo name, description, and URL - the URL can't be changed
+afterward, since existing F-Droid clients would be pointed at the old one).
+GitHub repos and patch targets start out empty; add them from the GitHub and
+Patching tabs, and adjust every other setting (update interval, GitHub
+token, defaults for new repos, etc.) from the **Settings** tab.
 
 ### 2. Build and Run
 
+Building the image compiles the Kotlin app, which depends on the
+[morphe-patcher](https://github.com/MorpheApp/morphe-patcher) library.
+morphe-patcher is published to GitHub Packages, which requires an
+authenticated request even to download a public package — so building
+locally needs a GitHub token (any account's token works; it does not need
+any special access to `MorpheApp/morphe-patcher`, just needs to be a valid,
+authenticated GitHub identity):
+
 ```bash
-# Build the Docker image
-docker-compose build
+# Build the Docker image (BuildKit secret keeps the token out of image layers)
+DOCKER_BUILDKIT=1 docker build \
+  --secret id=github_token,env=GITHUB_TOKEN \
+  --build-arg GITHUB_ACTOR=<your-github-username> \
+  -t custom-repo .
 
 # Start the container
 docker-compose up -d
 
 # Check logs
 docker-compose logs -f
+```
+
+(CI builds via `.github/workflows/docker-publish.yml` use the workflow's own
+`secrets.GITHUB_TOKEN`/`github.actor` automatically — no setup needed there.)
+
+If you're using Apple's `container` CLI instead of Docker, use
+`local.Dockerfile` instead — its builder doesn't support BuildKit secret
+mounts, so the token is passed as a plain build arg there:
+
+```bash
+container build \
+  --build-arg GITHUB_ACTOR=<your-github-username> \
+  --build-arg GITHUB_TOKEN=<your-github-token> \
+  -t custom-repo -f local.Dockerfile .
 ```
 
 The repository will be available at `http://localhost:8080`
@@ -164,64 +141,136 @@ sudo systemctl reload nginx
 
 The repository will sync and your apps will appear in F-Droid!
 
-## Documentation
+## APK Patching (Morphe + APKMirror)
 
-- **[PER_REPO_CONFIG.md](PER_REPO_CONFIG.md)** - Comprehensive guide to per-repository configuration
-- **[CHANGELOG.md](CHANGELOG.md)** - Feature changes and updates
-- **[config.example.yml](config.example.yml)** - Example configuration with various scenarios
+The admin UI at `/admin` has two tabs:
+
+- **GitHub** — the original flow described above (monitors GitHub releases).
+- **Patching** — a separate pipeline that watches APKMirror app pages for new
+  versions, and when a version matches a patch attached to that app, downloads
+  the APK, patches it with Morphe, and publishes the result to its own F-Droid
+  repo served at `/patched/repo` (add it as a second repo URL in the F-Droid
+  client). Only the newest **3 versions** per (app, patch) pair are kept —
+  older ones are deleted automatically.
+
+The whole server (admin UI, GitHub release checker, APKMirror scraper, and
+patch pipeline) is a single Kotlin/JVM application
+(`morphe-fdroid-server/`) that calls the
+[morphe-patcher](https://github.com/MorpheApp/morphe-patcher) library
+directly — there's no external Morphe CLI process, no command templates, and
+no jars to auto-download. `fdroidserver` (the `fdroid` CLI) is the only
+remaining Python dependency, used only to generate/sign the repo index.
+
+### APK bundles (.apkm/.xapk/.apks)
+
+Some apps (usually large ones) are only published on APKMirror as a bundle
+(`base.apk` plus split APKs) rather than a single installable `.apk`. When a
+patch target's download turns out to be a bundle, morphe-patcher's
+`ApkMerger` merges **all** the splits it contains into one installable APK
+before patching — there's no per-arch/density/language selection to
+configure. If APKMirror also offers a plain `.apk` for that version, it's
+preferred over the bundle.
+
+### Patch library
+
+`.mpp` patch files are managed in a **library**, separate from the apps that
+use them: upload a patch once in the Patching tab's "Patch Library" section,
+then attach it to any number of apps in "Patched Apps" (each attachment has
+its own supported-version list). Re-uploading a patch's content via "Update"
+replaces the file for every app using it, invalidates their cached results,
+and resets any per-app sub-patch/option overrides, so the next check
+re-patches with the new version's defaults.
+
+Each library patch also has a **"View Packages"** button that inspects the
+`.mpp` file directly (via `loadPatchesFromJar`) and shows, for every
+individual patch inside it, its name/description and which app package(s)
+and version(s) it supports (a single `.mpp` can bundle multiple named
+patches with different compatible packages, like a ReVanced patch bundle).
+This is read live from the file each time — nothing is cached.
+
+### Per-app sub-patch and option overrides
+
+A `.mpp` file can bundle several named sub-patches, each individually
+enabled or disabled by default, and each with its own configurable options
+(with default values) — think ReVanced's "Custom branding", "Hide ads", etc.
+On a Patch Target's **"Patches"** button, each attached patch has a
+**"Configure"** button showing every sub-patch the `.mpp` contains, its
+default enabled/disabled state, and its options with their default values.
+You can:
+
+- Tick/untick a sub-patch to force it on or off, away from the `.mpp`'s own
+  default.
+- Type a value into an option field to override its default (leave it
+  matching the shown default, or empty, to just use the `.mpp`'s value).
+
+Only the fields you actually change are saved as overrides
+(`patch_selection` / `option_overrides` on that attachment in the database);
+everything else keeps following the `.mpp`'s own defaults. These overrides
+are applied in-process by setting each `Patch`/`Option`'s value directly
+before running the patcher — no shell flags involved.
+
+### Setting it up
+
+1. **Upload a patch** in the Patching tab's Patch Library: an id, display
+   name, the `.mpp` file, and an optional version label.
+
+2. **Add a patch target**: a display name, the APKMirror app page URL, and
+   (optionally) the expected package name.
+
+3. **Attach the patch to the target** via its "Patches" button, specifying
+   which app version(s) it supports (comma-separated, or `*` for any
+   version). The same library patch can be attached to multiple app targets.
+   **Leave the versions field empty** to instead read supported versions
+   straight from the `.mpp` file itself, filtered to the target's
+   `package_name` — useful when you don't want to duplicate a patch's own
+   compatibility info into the config.
+
+4. The patch scheduler polls on the same interval as the GitHub checker
+   (override with `patch_check_interval` on the Settings tab) — each cycle it
+   checks every patch target's APKMirror page. When it finds a version
+   matching an attached patch that hasn't been processed yet, it downloads,
+   merges (if it's a bundle), patches, signs, and updates the
+   `/patched/repo` index.
+
+### Caveats
+
+- **APKMirror has no official API.** New versions are discovered by scraping
+  its HTML pages, which is fragile (breaks if APKMirror changes markup) and
+  against APKMirror's Terms of Service. Proceed at your own risk.
+- Logs for this pipeline are part of the main app process's logs (`docker
+  exec fdroid-repo tail -f /var/log/supervisor/fdroid-server.log` or
+  `docker-compose logs -f`).
 
 ## Configuration Options
 
-### config.yml Options
+Everything below is configured from the admin UI at `/admin` (Settings tab
+for global options, GitHub tab for per-repo options) - there is no
+`config.yml` file anymore.
 
-### Global Configuration Options
+### Global settings (Settings tab)
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `repo_name` | Display name of your repository | "My Custom F-Droid Repo" |
-| `repo_description` | Description shown in F-Droid | "Custom F-Droid repository..." |
-| `repo_url` | Public URL where repo is accessible | Required |
+| `repo_name` | Display name of your repository | Set during first-run setup; editable after |
+| `repo_description` | Description shown in F-Droid | Set during first-run setup; editable after |
+| `repo_url` | Public base URL your domain is served on (no path, e.g. `https://fdroid.example.com`) - `/repo` and `/patched/repo` are appended automatically for the main and patched F-Droid repos | Set during first-run setup; **locked** after |
 | `update_interval` | Seconds between update checks | 3600 (1 hour) |
+| `patch_check_interval` | Seconds between APKMirror patch checks (optional) | Falls back to `update_interval` |
 | `github_token` | GitHub personal access token (optional) | "" |
+| `apk_pattern` | Default regex used to match APK filenames | `.*\.apk$` |
 | `max_versions_per_app` | Max APK versions to keep per app (0 = keep all) | 0 |
+| `log_level` | Log verbosity | INFO |
 
-### Per-Repository Options
+### Defaults for new GitHub repos (Settings tab)
 
-Each repository can have individual settings. If not specified, values from `defaults` section are used.
+Applied to a repo unless it overrides the value itself (GitHub tab).
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `repo` | GitHub repository (owner/name) | Required |
 | `include_prereleases` | Include pre-release versions (beta, alpha, RC) | true |
 | `include_drafts` | Include draft releases (not recommended) | false |
-| `max_releases` | Max releases to check for this repo (0 = all) | 5 |
-| `enabled` | Enable/disable monitoring for this repo | true |
-
-### Configuration Formats
-
-**Simple format:**
-```yaml
-github_repos:
-  - "owner/repo"  # Uses defaults
-```
-
-**Detailed format:**
-```yaml
-github_repos:
-  - repo: "owner/repo"
-    include_prereleases: true
-    include_drafts: false
-    max_releases: 10
-    enabled: true
-```
-
-**Mixed format:**
-```yaml
-github_repos:
-  - "owner/simple-repo"  # Uses defaults
-  - repo: "owner/custom-repo"  # Custom settings
-    include_prereleases: false
-```
+| `max_releases` | Max releases to check | 5 |
+| `enabled` | Enable/disable monitoring by default | true |
 
 ### GitHub Token
 
@@ -230,13 +279,9 @@ Without a token, you're limited to 60 API requests per hour. To increase this:
 1. Go to https://github.com/settings/tokens
 2. Generate a new token (classic)
 3. Select scope: `public_repo` (for public repos only)
-4. Copy the token and add it to `config.yml`
+4. Paste it into the **GitHub token** field on the Settings tab and save.
 
 This increases your rate limit to 5,000 requests/hour.
-
-## Release Types and Per-Repository Configuration
-
-The updater can monitor different types of GitHub releases, and each repository can have its own settings.
 
 ### Release Types
 
@@ -250,95 +295,13 @@ The updater can monitor different types of GitHub releases, and each repository 
 
 **Draft Releases**: Unpublished releases still in draft status. Usually not recommended.
 
-### Per-Repository Configuration Examples
-
-#### Example 1: Multiple Apps with Different Needs
-
-```yaml
-defaults:
-  include_prereleases: true
-  max_releases: 5
-
-github_repos:
-  # Production app - stable releases only
-  - repo: "mycompany/production-app"
-    include_prereleases: false
-    max_releases: 2
-  
-  # Beta testing app - include all pre-releases
-  - repo: "mycompany/beta-app"
-    include_prereleases: true
-    max_releases: 10
-  
-  # Internal testing - everything including drafts
-  - repo: "mycompany/internal-app"
-    include_prereleases: true
-    include_drafts: true
-    max_releases: 20
-  
-  # Third-party app - use defaults
-  - "termux/termux-app"
-```
-
-#### Example 2: Nightly Builds Setup
-
-```yaml
-github_repos:
-  # App with frequent nightly builds
-  - repo: "project/nightly-builds"
-    include_prereleases: true    # Include nightlies
-    max_releases: 15             # Check last 15 releases
-  
-  # Keep disk usage manageable
-max_versions_per_app: 5  # Keep only 5 versions total
-```
-
-#### Example 3: Stable Apps Only
-
-```yaml
-defaults:
-  include_prereleases: false  # Global: stable only
-  max_releases: 3
-
-github_repos:
-  - "signal/android"
-  - "briarproject/briar"
-  - "guardianproject/haven"
-  # All use stable-only defaults
-```
-
-#### Example 4: Mixed Configuration
-
-```yaml
-defaults:
-  include_prereleases: true
-  max_releases: 5
-
-github_repos:
-  # Use defaults
-  - "app1/repo"
-  - "app2/repo"
-  
-  # Override: stable only
-  - repo: "app3/repo"
-    include_prereleases: false
-  
-  # Override: check more releases
-  - repo: "app4/repo"
-    max_releases: 15
-  
-  # Temporarily disabled
-  - repo: "old-app/repo"
-    enabled: false
-```
-
 ### Configuration Tips
 
-1. **Start conservative**: Begin with `max_releases: 3` and `include_prereleases: false`
-2. **Per-app tuning**: Increase settings only for repos that need it
+1. **Start conservative**: Begin with a low `max_releases` and `include_prereleases` off
+2. **Per-app tuning**: Override the GitHub tab's defaults only for repos that need it
 3. **Monitor disk usage**: Use `max_versions_per_app` if disk space is limited
 4. **API rate limits**: More releases = more API calls. Watch your GitHub rate limit
-5. **Disable unused repos**: Set `enabled: false` instead of removing from config
+5. **Disable unused repos**: Toggle `enabled` off instead of removing the repo
 
 ## Docker Compose Configuration
 
@@ -353,19 +316,14 @@ ports:
 
 ### Volumes
 
-The configuration uses named volumes for data persistence:
-- `fdroid-repo`: APK files and repository data
-- `fdroid-metadata`: Application metadata
-- `fdroid-tmp`: Temporary files and cache
-
-To use host directories instead:
-
-```yaml
-volumes:
-  - ./data/repo:/srv/fdroid/repo
-  - ./data/metadata:/srv/fdroid/metadata
-  - ./data/tmp:/srv/fdroid/tmp
-```
+`docker-compose.yml` uses host bind mounts under `${CONFIG_FOLDER}` (set that
+env var, or edit the paths directly) for data persistence:
+- `${CONFIG_FOLDER}/fdroid-data/` → `/srv/fdroid` — repo, patched-repo, and
+  metadata (everything the `fdroid` CLI manages)
+- `${CONFIG_FOLDER}/db` → `/app/db` — the SQLite database (all settings,
+  GitHub repos, patch library/targets, checked-release history)
+- `${CONFIG_FOLDER}/logs` → `/var/log` — optional, for persisting logs across
+  container recreation
 
 ## Monitoring and Maintenance
 
@@ -379,20 +337,14 @@ docker-compose logs -f
 docker-compose logs -f fdroid-repo
 
 # Live log file
-docker exec fdroid-repo tail -f /var/log/fdroid-updater.log
+docker exec fdroid-repo tail -f /var/log/supervisor/fdroid-server.log
 ```
 
 ### Force Update Check
 
-```bash
-docker exec fdroid-repo python3 -c "
-from update_checker import FDroidUpdater
-updater = FDroidUpdater()
-updater.check_for_updates()
-"
-```
-
-### Restart Container
+Both the GitHub and Patching schedulers run their first check immediately on
+process startup, so restarting the container triggers an immediate check of
+everything without waiting for the configured interval:
 
 ```bash
 docker-compose restart
