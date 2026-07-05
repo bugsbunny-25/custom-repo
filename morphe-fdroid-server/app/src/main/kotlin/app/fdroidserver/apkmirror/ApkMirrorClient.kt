@@ -2,6 +2,7 @@ package app.fdroidserver.apkmirror
 
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.parser.Parser
 import java.io.File
 import java.net.CookieManager
 import java.net.CookiePolicy
@@ -11,20 +12,23 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.StandardOpenOption
 import java.time.Duration
+import kotlin.random.Random
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
 /**
- * Scrapes APKMirror app pages to discover versions and resolve a direct
- * download URL, and downloads the resulting APK. Direct Kotlin port of the
- * old Python `apkmirror.py`, using Jsoup instead of BeautifulSoup (the CSS
- * selectors translate close to verbatim) and the JDK's own `java.net.http`
- * client instead of `requests`.
+ * Discovers APKMirror app versions from its RSS feed and resolves/downloads
+ * the actual APK by scraping the version/variant/download pages. Direct
+ * Kotlin port of the old Python `apkmirror.py`'s download-resolution logic,
+ * using Jsoup instead of BeautifulSoup (the CSS selectors translate close to
+ * verbatim) and the JDK's own `java.net.http` client instead of `requests`;
+ * version discovery itself has since moved off HTML scraping onto the feed
+ * (see [getVersions]).
  *
- * APKMirror has no official API. This is inherently fragile (breaks
- * whenever APKMirror changes its markup) and scraping is against
- * APKMirror's Terms of Service - use at your own risk (same caveat as the
- * Python version carried).
+ * APKMirror has no official API. Both the feed and the page-scraping
+ * fallbacks are inherently fragile (break whenever APKMirror changes its
+ * markup) and scraping is against APKMirror's Terms of Service - use at your
+ * own risk (same caveat as the Python version carried).
  */
 class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMirrorClient::class.java.name)) {
 
@@ -55,71 +59,108 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
         return builder
     }
 
+    /**
+     * Fetches [url], retrying with backoff if APKMirror serves a Cloudflare
+     * "managed challenge" interstitial (the `Just a moment...` page also
+     * seen while preparing the RSS-feed fixtures for `ApkMirrorClientTest` -
+     * it showed up intermittently on the same feed URL that worked moments
+     * earlier, so it reads as rate-limiting/heuristic bot-scoring rather than
+     * a hard per-URL block). A plain HTTP client can't execute the
+     * challenge's JS/proof-of-work, so retrying can't force a pass the way a
+     * real browser would - but backing off and trying again a few times
+     * recovers the transient cases, and failing that we raise a distinct,
+     * actionable error instead of quietly returning (or worse, parsing) the
+     * interstitial HTML as if it were the real page.
+     */
     private fun get(url: String, referer: String? = null): String {
-        val request = requestBuilder(url, referer).GET().build()
-        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+        lateinit var response: HttpResponse<String>
+        for (attempt in 1..MAX_FETCH_ATTEMPTS) {
+            val request = requestBuilder(url, referer).GET().build()
+            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+            if (!isCloudflareChallenge(response)) break
+            if (attempt == MAX_FETCH_ATTEMPTS) {
+                error("apkmirror: blocked by a Cloudflare challenge fetching $url after $MAX_FETCH_ATTEMPTS attempts")
+            }
+            logger.warn("apkmirror: Cloudflare challenge fetching $url (attempt $attempt/$MAX_FETCH_ATTEMPTS), retrying")
+            Thread.sleep(challengeRetryDelayMs(attempt, response))
+        }
         if (response.statusCode() !in 200..299) {
             error("HTTP ${response.statusCode()} fetching $url")
         }
         return response.body()
     }
 
+    /** Detects Cloudflare's interstitial rather than the real page: either
+     * the `cf-mitigated: challenge` response header Cloudflare adds to
+     * challenged responses, or the `Just a moment...` challenge page's
+     * markup (checked on the body since the header isn't always present -
+     * some challenge modes only show up in the HTML). */
+    private fun isCloudflareChallenge(response: HttpResponse<String>): Boolean {
+        if (response.headers().firstValue("cf-mitigated").orElse("").equals("challenge", ignoreCase = true)) {
+            return true
+        }
+        return CLOUDFLARE_CHALLENGE_RE.containsMatchIn(response.body())
+    }
+
+    /** Backoff delay before retrying a challenged request: honors a
+     * `Retry-After` header if Cloudflare sent one, otherwise exponential
+     * backoff from [BASE_RETRY_DELAY_MS] with random jitter so concurrent
+     * retries don't all land on the same instant. */
+    private fun challengeRetryDelayMs(attempt: Int, response: HttpResponse<String>): Long {
+        val retryAfterSeconds = response.headers().firstValue("retry-after").orElse(null)?.toLongOrNull()
+        if (retryAfterSeconds != null) return retryAfterSeconds * 1000
+
+        val backoff = BASE_RETRY_DELAY_MS * (1L shl (attempt - 1))
+        return backoff.coerceAtMost(MAX_RETRY_DELAY_MS) + Random.nextLong(JITTER_MS)
+    }
+
     private fun parse(html: String, baseUrl: String): Document = Jsoup.parse(html, baseUrl)
 
-    /** Returns app versions on an APKMirror app listing page, newest first,
-     * as they appear on the page. */
-    fun getVersions(appUrl: String): List<VersionEntry> = getVersionsPage(appUrl, page = 1)
-
-    private fun getVersionsPage(appUrl: String, page: Int): List<VersionEntry> {
-        val url = if (page <= 1) appUrl else appendQueryParam(appUrl, "page", page.toString())
-        val doc = parse(get(url), url)
-        val seen = mutableSetOf<String>()
-        val versions = mutableListOf<VersionEntry>()
-
-        for (row in doc.select("div.appRow")) {
-            val link = row.selectFirst("h5.appRowTitle a[href]") ?: continue
-            val pageUrl = link.absUrl("href")
-            val version = extractVersion(link.text().trim())
-            if (!seen.add(version)) continue
-            versions.add(VersionEntry(version, pageUrl))
-        }
-
+    /**
+     * Returns app versions from APKMirror's RSS feed (`{appUrl}/feed/`),
+     * newest first. Reads the version straight out of the feed's `<title>`
+     * text (see [parseFeedVersions]), so suffixes the old HTML-listing
+     * regex used to truncate - " beta", "+rc3-2026.06.24", " (Android TV)" -
+     * come through intact, matching whatever a patch's `supported_versions`
+     * entry pins. The feed only exposes the newest ~10 releases - APKMirror
+     * has no pagination for it, unlike the HTML listing this replaced - so
+     * there's no way to look further back for an older pinned version.
+     */
+    fun getVersions(appUrl: String): List<VersionEntry> {
+        val url = appUrl.trimEnd('/') + "/feed/"
+        val versions = parseFeedVersions(get(url))
         logger.info("apkmirror: found ${versions.size} version(s) on $url")
         logger.debug("apkmirror: versions on $url: ${versions.joinToString { it.version }}")
         return versions
     }
 
     /**
-     * Pulls the version token out of an appRowTitle link's text (e.g.
-     * "AccuWeather: Weather Radar 21.1.12-2-rc" -> "21.1.12-2-rc"), pulled out
-     * of [getVersionsPage] so it's unit-testable without a network call (see
-     * `ApkMirrorClientTest`). Takes the first run of characters starting at a
-     * digit and continuing through any word/dot/dash characters (stopping at
-     * the next space) - covers plain dotted versions as well as suffixed ones
-     * like "-2-rc" or "-beta1" that a strict "digits and dots only" pattern
-     * would truncate, silently dropping the suffix and breaking matches
-     * against a `supported_versions` entry that includes it. Falls back to
-     * the full text if it contains no digit at all.
+     * Pure feed-parsing logic, pulled out of [getVersions] so it's
+     * unit-testable against saved feed XML without a network call (see
+     * `ApkMirrorClientTest`).
+     *
+     * APKMirror's feed `<channel><title>` is always
+     * "Download {app_name} APKs for Android - APKMirror", and each
+     * `<item><title>` is "{app_name} (variant) {version} by {company}" with
+     * the "(variant)" segment - e.g. "(Android TV)", "(Fire TV)" - present
+     * only for apps that ship a device-specific listing. Anchoring the
+     * item-title regex on the app name pulled from the channel title (rather
+     * than guessing at where the version starts) is what lets the version
+     * capture group run all the way to " by ", keeping beta/rc/date suffixes
+     * as part of the version instead of truncating them.
      */
-    internal fun extractVersion(text: String): String = VERSION_RE.find(text)?.value ?: text
+    internal fun parseFeedVersions(feedXml: String): List<VersionEntry> {
+        val doc = Jsoup.parse(feedXml, "", Parser.xmlParser())
+        val channelTitle = doc.selectFirst("channel > title")?.text().orEmpty()
+        val appName = CHANNEL_TITLE_RE.find(channelTitle)?.groupValues?.get(1) ?: return emptyList()
+        val itemTitleRe = Regex("^${Regex.escape(appName)}(?: \\([^)]*\\))? (.+) by .+$")
 
-    /** Looks for [version] beyond what [getVersions] already returned, by
-     * paging through the app's older-releases listing (APKMirror only shows
-     * the newest handful on the first page). Used when a patch's
-     * `supported_versions` pins a version that has since scrolled off the
-     * first page. Returns null if it isn't found within [maxPages]. */
-    fun findVersion(appUrl: String, version: String, maxPages: Int = 5): VersionEntry? {
-        for (page in 2..maxPages) {
-            val versions = getVersionsPage(appUrl, page)
-            if (versions.isEmpty()) return null
-            versions.firstOrNull { it.version == version }?.let { return it }
+        return doc.select("item").mapNotNull { item ->
+            val title = item.selectFirst("title")?.text() ?: return@mapNotNull null
+            val link = item.selectFirst("link")?.text()?.trim() ?: return@mapNotNull null
+            val version = itemTitleRe.find(title)?.groupValues?.get(1) ?: return@mapNotNull null
+            VersionEntry(version, link)
         }
-        return null
-    }
-
-    private fun appendQueryParam(url: String, key: String, value: String): String {
-        val separator = if ("?" in url) "&" else "?"
-        return "$url$separator$key=$value"
     }
 
     /** From a version page, picks a variant (preferring a plain APK over an
@@ -237,6 +278,16 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-        private val VERSION_RE = Regex("""\d[\w.-]*""")
+        private val CHANNEL_TITLE_RE = Regex("""^Download (.+) APKs for Android - APKMirror$""")
+
+        // Matches Cloudflare's "Just a moment..." managed-challenge interstitial,
+        // as opposed to the real page - seen in practice on both the HTML
+        // listing pages and the RSS feed.
+        private val CLOUDFLARE_CHALLENGE_RE = Regex("""<title>Just a moment\.\.\.</title>|_cf_chl_opt|challenges\.cloudflare\.com""")
+
+        private const val MAX_FETCH_ATTEMPTS = 3
+        private const val BASE_RETRY_DELAY_MS = 1_500L
+        private const val MAX_RETRY_DELAY_MS = 8_000L
+        private const val JITTER_MS = 750L
     }
 }

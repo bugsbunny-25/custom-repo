@@ -194,34 +194,24 @@ class PatchScheduler(
                     cacheKey !in processed && matchesSupportedVersion(v.version, supportedVersions)
                 }
 
-                // If nothing on the visible listing page matched, page through
-                // APKMirror's history looking for each pinned version directly, in
-                // the order they're configured (a version scrolled off the first
-                // page needs finding some other way, but since we're not ranking
-                // version strings, config order is the only tie-break we have).
-                val pinnedCandidate = if (listedCandidate == null) {
+                if (listedCandidate == null) {
+                    // APKMirror's feed only ever exposes its newest ~10
+                    // releases and has no pagination, so a pinned version
+                    // that isn't in it can't be found any other way - unlike
+                    // the old HTML listing this replaced, there's no history
+                    // left to page through.
                     concreteSupported
                         .filterNot { "$it::${attachment.patchId}" in processed }
                         .filterNot { pinned -> versions.any { it.version == pinned } }
-                        .firstNotNullOfOrNull { pinned ->
-                            logger.info(
+                        .forEach { pinned ->
+                            logger.warn(
                                 "${target.id}: configured version $pinned for patch '${attachment.patchId}' " +
-                                    "not in apkmirror listing, searching for it directly",
+                                    "not in apkmirror's feed, skipping",
                             )
-                            apkMirrorClient.findVersion(target.apkmirrorUrl, pinned).also {
-                                if (it == null) {
-                                    logger.warn(
-                                        "${target.id}: could not find configured version $pinned on apkmirror " +
-                                            "for patch '${attachment.patchId}'",
-                                    )
-                                }
-                            }
                         }
-                } else {
-                    null
                 }
 
-                val candidate = listedCandidate ?: pinnedCandidate ?: continue
+                val candidate = listedCandidate ?: continue
 
                 val version = candidate.version
                 logger.info("${target.id}: found new patchable version $version for patch '${attachment.patchId}'")
