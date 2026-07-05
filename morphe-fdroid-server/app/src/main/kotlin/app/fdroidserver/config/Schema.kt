@@ -107,6 +107,7 @@ object PatchAttachments : Table("patch_attachments") {
     val patchArgs = text("patch_args").default("")
     val patchSelectionJson = text("patch_selection_json").default("{}")
     val optionOverridesJson = text("option_overrides_json").default("{}")
+    val includeExperimentalVersions = bool("include_experimental_versions").default(false)
 
     override val primaryKey = PrimaryKey(id)
 

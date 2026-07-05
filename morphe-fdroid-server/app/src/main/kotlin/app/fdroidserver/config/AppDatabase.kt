@@ -40,7 +40,11 @@ class AppDatabase(dbDir: File) {
         val dbFile = File(dbDir, "app.db")
         db = Database.connect("jdbc:sqlite:${dbFile.absolutePath}", driver = "org.sqlite.JDBC")
         transaction(db) {
-            SchemaUtils.create(
+            // createMissingTablesAndColumns (not just create) so existing
+            // SQLite databases from before a column was added (e.g.
+            // include_experimental_versions) get it added via ALTER TABLE
+            // instead of silently missing it.
+            SchemaUtils.createMissingTablesAndColumns(
                 Settings, GithubRepos, GithubCheckedReleases,
                 PatchLibraryTable, PatchTargets, PatchAttachments, PatchCheckedEntries,
             )

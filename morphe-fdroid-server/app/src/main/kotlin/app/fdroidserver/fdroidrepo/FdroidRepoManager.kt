@@ -128,6 +128,12 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
      * [repoDir] (grouped by [groupKey]), deleting the rest. `maxVersions <=
      * 0` disables cleanup entirely (matches the Python version's
      * `max_versions_per_app: 0` = keep-all convention).
+     *
+     * Ranks by the version encoded in the filename (`{targetId}__{patchId}__
+     * {version}.apk`), not file mtime: [PatchScheduler] can end up patching
+     * an older version after the newest one has already been published (see
+     * its own comment on that), which would otherwise have a newer mtime
+     * than the actual latest version and push it out of the keep-window.
      */
     fun pruneOldVersions(repoDir: File, maxVersions: Int, groupKey: (File) -> String) {
         if (maxVersions <= 0) return
@@ -135,7 +141,7 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
         val groups = files.groupBy(groupKey)
 
         for ((key, groupFiles) in groups) {
-            val sorted = groupFiles.sortedByDescending { it.lastModified() }
+            val sorted = groupFiles.sortedWith { a, b -> compareVersions(extractVersion(b), extractVersion(a)) }
             if (sorted.size > maxVersions) {
                 sorted.drop(maxVersions).forEach { old ->
                     logger.info("Removing old APK for $key: ${old.name}")
@@ -143,6 +149,18 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
                 }
             }
         }
+    }
+
+    private fun extractVersion(file: File): String = file.nameWithoutExtension.substringAfterLast("__")
+
+    private fun compareVersions(a: String, b: String): Int {
+        val partsA = a.split(".").map { it.toIntOrNull() ?: 0 }
+        val partsB = b.split(".").map { it.toIntOrNull() ?: 0 }
+        for (i in 0 until maxOf(partsA.size, partsB.size)) {
+            val cmp = (partsA.getOrElse(i) { 0 }).compareTo(partsB.getOrElse(i) { 0 })
+            if (cmp != 0) return cmp
+        }
+        return 0
     }
 
     companion object {
