@@ -1,14 +1,13 @@
 # syntax=docker/dockerfile:1
 #
-# Multi-stage build: the app itself (admin server, GitHub/APKMirror
-# scrapers, patch pipeline) is now 100% Kotlin (see morphe-fdroid-server/),
-# calling morphe-patcher directly instead of shelling out to a CLI. The only
-# remaining external dependency is `fdroidserver` (the `fdroid` CLI) - a
-# separate, actively-maintained Python project from the F-Droid
-# organization that generates/signs the repo index; we intentionally don't
-# reimplement it (see morphe-fdroid-server/plan.md §8), so Python still
-# appears in the final image, but only as that one unmodified third-party
-# tool - none of *this project's* application logic is Python anymore.
+# Local-build variant of Dockerfile for use with Apple's `container` CLI,
+# whose builder does not implement the `secret` mount type used by the
+# main Dockerfile (`RUN --mount=type=secret=...`). GITHUB_TOKEN is passed
+# here as a plain ARG/ENV instead. This is only used in the discarded
+# `build` stage - it never reaches the final runtime image's layers - but
+# it does linger in this build stage's local layer cache, so prefer the
+# real Dockerfile (with `docker buildx build --secret ...`) whenever
+# Docker is available. See Dockerfile for the full multi-stage build notes.
 
 # ---------------------------------------------------------------------------
 # Stage 1: build the Kotlin app
@@ -25,21 +24,19 @@ COPY morphe-fdroid-server/ .
 
 # morphe-patcher is a normal Gradle dependency resolved from GitHub Packages,
 # which requires an authenticated request even for public packages (see
-# settings.gradle.kts). The token is passed in as a BuildKit secret (never a
-# plain ARG/ENV - those get baked into the image's build history/layers):
-#   DOCKER_BUILDKIT=1 docker build \
-#     --secret id=github_token,env=GITHUB_TOKEN \
+# settings.gradle.kts).
+#   container build \
 #     --build-arg GITHUB_ACTOR=<your-github-username> \
-#     -t custom-repo .
+#     --build-arg GITHUB_TOKEN=<your-github-token> \
+#     -t custom-repo -f Dockerfile.local .
 # GITHUB_ACTOR just needs to be *a* valid GitHub username for GHP's basic-auth
 # check - it does not need any access to MorpheApp/morphe-patcher itself; any
-# account's token works for reading a public package. In CI, the workflow's
-# own `secrets.GITHUB_TOKEN` + `github.actor` are used instead - see
-# .github/workflows/docker-publish.yml.
+# account's token works for reading a public package.
 ARG GITHUB_ACTOR
+ARG GITHUB_TOKEN
 ENV GITHUB_ACTOR=${GITHUB_ACTOR}
-RUN --mount=type=secret=id=github_token,env=GITHUB_TOKEN \
-    ./gradlew --no-daemon build -x test
+ENV GITHUB_TOKEN=${GITHUB_TOKEN}
+RUN ./gradlew --no-daemon build -x test
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime image

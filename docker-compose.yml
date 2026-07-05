@@ -9,15 +9,21 @@ services:
     volumes:
       # Persist the F-Droid repository data
       - ${CONFIG_FOLDER}/fdroid-data/:/srv/fdroid
-      
-      # Mount configuration (edit this file to add your GitHub repos)
-      - ${CONFIG_FOLDER}/config.yml:/app/config.yml
-      
+
+      # Persist the SQLite database (all app settings, GitHub repos, patch
+      # library/targets, checked-release history). Everything is configured
+      # through the admin UI's Settings page after first run - there's no
+      # config.yml to hand-edit anymore.
+      - ${CONFIG_FOLDER}/db:/app/db
+
       # Optional: persist logs
       - ${CONFIG_FOLDER}/logs:/var/log
-    
+
     environment:
       - TZ=UTC
+      # Override for a different DB directory; defaults to /app/db (the
+      # app.db file is created inside it automatically if missing)
+      # - DB_PATH=/app/db
     
     # Expose port (will be proxied by your nginx reverse proxy)
     ports:
