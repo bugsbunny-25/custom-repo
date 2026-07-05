@@ -47,6 +47,7 @@ class AppDatabase(dbDir: File) {
             SchemaUtils.createMissingTablesAndColumns(
                 Settings, GithubRepos, GithubCheckedReleases,
                 PatchLibraryTable, PatchTargets, PatchAttachments, PatchCheckedEntries,
+                PatchLibraryTableTv, PatchTargetsTv, PatchAttachmentsTv, PatchCheckedEntriesTv,
             )
             if (Settings.selectAll().empty()) {
                 Settings.insert { it[id] = 1 }

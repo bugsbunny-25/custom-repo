@@ -143,7 +143,7 @@ The repository will sync and your apps will appear in F-Droid!
 
 ## APK Patching (Morphe + APKMirror)
 
-The admin UI at `/admin` has two tabs:
+The admin UI at `/admin` has three tabs:
 
 - **GitHub** — the original flow described above (monitors GitHub releases).
 - **Patching** — a separate pipeline that watches APKMirror app pages for new
@@ -152,6 +152,13 @@ The admin UI at `/admin` has two tabs:
   repo served at `/patched/repo` (add it as a second repo URL in the F-Droid
   client). Only the newest **3 versions** per (app, patch) pair are kept —
   older ones are deleted automatically.
+- **Patched TV** — the same pipeline as **Patching**, but fully independent:
+  its own patch library, app targets, attachments, and processed-version
+  history, published to its own repo at `/patched-tv/repo` and signed with its
+  own keystore. It exists because mobile and TV builds of the same app usually
+  share a package name, so patched mobile and TV APKs can't both live in the
+  `/patched/repo` repo without colliding — add `/patched-tv/repo` as a third
+  repo URL in the F-Droid client for TV builds.
 
 The whole server (admin UI, GitHub release checker, APKMirror scraper, and
 patch pipeline) is a single Kotlin/JVM application
@@ -230,7 +237,9 @@ before running the patcher — no shell flags involved.
    checks every patch target's APKMirror page. When it finds a version
    matching an attached patch that hasn't been processed yet, it downloads,
    merges (if it's a bundle), patches, signs, and updates the
-   `/patched/repo` index.
+   `/patched/repo` index. The **Patched TV** tab runs the exact same steps on
+   its own schedule against its own independent patch library/targets,
+   updating `/patched-tv/repo` instead.
 
 5. To patch one specific version right away instead of waiting on the
    scheduler, use a patch target's **"Patch Specific Version"** button and
@@ -264,7 +273,7 @@ for global options, GitHub tab for per-repo options) - there is no
 |--------|-------------|---------|
 | `repo_name` | Display name of your repository | Set during first-run setup; editable after |
 | `repo_description` | Description shown in F-Droid | Set during first-run setup; editable after |
-| `repo_url` | Public base URL your domain is served on (no path, e.g. `https://fdroid.example.com`) - `/repo` and `/patched/repo` are appended automatically for the main and patched F-Droid repos | Set during first-run setup; **locked** after |
+| `repo_url` | Public base URL your domain is served on (no path, e.g. `https://fdroid.example.com`) - `/repo`, `/patched/repo`, and `/patched-tv/repo` are appended automatically for the main, patched, and patched-TV F-Droid repos | Set during first-run setup; **locked** after |
 | `update_interval` | Seconds between update checks | 3600 (1 hour) |
 | `patch_check_interval` | Seconds between APKMirror patch checks (optional) | Falls back to `update_interval` |
 | `github_token` | GitHub personal access token (optional) | "" |
@@ -329,8 +338,8 @@ ports:
 
 `docker-compose.yml` uses host bind mounts under `${CONFIG_FOLDER}` (set that
 env var, or edit the paths directly) for data persistence:
-- `${CONFIG_FOLDER}/fdroid-data/` → `/srv/fdroid` — repo, patched-repo, and
-  metadata (everything the `fdroid` CLI manages)
+- `${CONFIG_FOLDER}/fdroid-data/` → `/srv/fdroid` — repo, patched-repo,
+  patched-tv-repo, and metadata (everything the `fdroid` CLI manages)
 - `${CONFIG_FOLDER}/db` → `/app/db` — the SQLite database (all settings,
   GitHub repos, patch library/targets, checked-release history)
 - `${CONFIG_FOLDER}/logs` → `/var/log` — optional, for persisting logs across

@@ -270,8 +270,27 @@ class AppConfig(private val db: AppDatabase) {
     }
 
     // ---------------------------------------------------------------------
-    // Patch library (reusable .mpp files)
+    // Patch library (reusable .mpp files) + patch targets (apps watched on
+    // APKMirror) + their attachments - all parameterized over a [PatchSchema]
+    // so the "Patching" and "Patched TV" tabs each get fully independent
+    // data (own library, own targets, own attachments, own processed-history)
+    // while sharing this one implementation.
     // ---------------------------------------------------------------------
+
+    /** Bundles the 4 tables backing one patch "channel" (see [Schema.kt]'s
+     * `PatchLibrarySchema`/`PatchTargetsSchema`/etc. base classes) so call
+     * sites pass one param instead of 4. */
+    data class PatchSchema(
+        val library: PatchLibrarySchema,
+        val targets: PatchTargetsSchema,
+        val attachments: PatchAttachmentsSchema,
+        val checkedEntries: PatchCheckedEntriesSchema,
+    )
+
+    object PatchSchemas {
+        val Mobile = PatchSchema(PatchLibraryTable, PatchTargets, PatchAttachments, PatchCheckedEntries)
+        val Tv = PatchSchema(PatchLibraryTableTv, PatchTargetsTv, PatchAttachmentsTv, PatchCheckedEntriesTv)
+    }
 
     @Serializable
     data class PatchLibraryEntryView(
@@ -291,31 +310,31 @@ class AppConfig(private val db: AppDatabase) {
         val contentBase64: String? = null,
     )
 
-    private fun patchLibraryRowToView(row: org.jetbrains.exposed.sql.ResultRow): PatchLibraryEntryView =
+    private fun patchLibraryRowToView(schema: PatchSchema, row: org.jetbrains.exposed.sql.ResultRow): PatchLibraryEntryView =
         PatchLibraryEntryView(
-            id = row[PatchLibraryTable.id],
-            name = row[PatchLibraryTable.name],
-            file = row[PatchLibraryTable.file],
-            version = row[PatchLibraryTable.version],
-            updatedAt = row[PatchLibraryTable.updatedAt],
+            id = row[schema.library.id],
+            name = row[schema.library.name],
+            file = row[schema.library.file],
+            version = row[schema.library.version],
+            updatedAt = row[schema.library.updatedAt],
         )
 
-    suspend fun listPatchLibrary(): List<PatchLibraryEntryView> = db.tx {
-        PatchLibraryTable.selectAll().map(::patchLibraryRowToView)
+    suspend fun listPatchLibrary(schema: PatchSchema): List<PatchLibraryEntryView> = db.tx {
+        schema.library.selectAll().map { patchLibraryRowToView(schema, it) }
     }
 
-    suspend fun addPatchToLibrary(id: String, name: String, fileName: String): Result<PatchLibraryEntryView> = db.tx {
+    suspend fun addPatchToLibrary(schema: PatchSchema, id: String, name: String, fileName: String): Result<PatchLibraryEntryView> = db.tx {
         if (!isValidSlug(id)) return@tx Result.Error("A valid id (letters, numbers, - and _ only) is required")
-        if (PatchLibraryTable.selectAll().where { PatchLibraryTable.id eq id }.any()) {
+        if (schema.library.selectAll().where { schema.library.id eq id }.any()) {
             return@tx Result.Error("A patch with id \"$id\" already exists")
         }
         val updatedAt = now()
-        PatchLibraryTable.insert {
-            it[PatchLibraryTable.id] = id
-            it[PatchLibraryTable.name] = name.ifBlank { id }
+        schema.library.insert {
+            it[schema.library.id] = id
+            it[schema.library.name] = name.ifBlank { id }
             it[file] = fileName
             it[version] = ""
-            it[PatchLibraryTable.updatedAt] = updatedAt
+            it[schema.library.updatedAt] = updatedAt
         }
         Result.Ok(PatchLibraryEntryView(id, name.ifBlank { id }, fileName, "", updatedAt))
     }
@@ -323,23 +342,24 @@ class AppConfig(private val db: AppDatabase) {
     data class PatchLibraryUpdateResult(val entry: PatchLibraryEntryView, val contentUpdated: Boolean)
 
     suspend fun updatePatchInLibrary(
+        schema: PatchSchema,
         id: String,
         newName: String?,
         newVersion: String?,
         newFileName: String?,
     ): Result<PatchLibraryUpdateResult> = db.tx {
-        val existing = PatchLibraryTable.selectAll().where { PatchLibraryTable.id eq id }.singleOrNull()
+        val existing = schema.library.selectAll().where { schema.library.id eq id }.singleOrNull()
             ?: return@tx Result.Error("Patch not found")
 
         val contentUpdated = newFileName != null
-        PatchLibraryTable.update({ PatchLibraryTable.id eq id }) {
+        schema.library.update({ schema.library.id eq id }) {
             if (newName != null) it[name] = newName.ifBlank { id }
             if (newVersion != null) it[version] = newVersion
             if (newFileName != null) it[file] = newFileName
             it[updatedAt] = now()
         }
-        val updatedRow = PatchLibraryTable.selectAll().where { PatchLibraryTable.id eq id }.single()
-        Result.Ok(PatchLibraryUpdateResult(patchLibraryRowToView(updatedRow), contentUpdated))
+        val updatedRow = schema.library.selectAll().where { schema.library.id eq id }.single()
+        Result.Ok(PatchLibraryUpdateResult(patchLibraryRowToView(schema, updatedRow), contentUpdated))
     }
 
     data class PatchDeleteResult(val id: String, val storedFile: String?, val detachedFrom: Int)
@@ -347,12 +367,12 @@ class AppConfig(private val db: AppDatabase) {
     /** Deleting from `patch_library` cascades to `patch_attachments` via the
      * FK's `ON DELETE CASCADE` - no manual sweep over every target needed
      * (the old map-based version had to loop `patched_apps` by hand). */
-    suspend fun deletePatchFromLibrary(id: String): Result<PatchDeleteResult> = db.tx {
-        val existing = PatchLibraryTable.selectAll().where { PatchLibraryTable.id eq id }.singleOrNull()
+    suspend fun deletePatchFromLibrary(schema: PatchSchema, id: String): Result<PatchDeleteResult> = db.tx {
+        val existing = schema.library.selectAll().where { schema.library.id eq id }.singleOrNull()
             ?: return@tx Result.Error("Patch not found")
-        val storedFile = existing[PatchLibraryTable.file]
-        val detached = PatchAttachments.selectAll().where { PatchAttachments.patchId eq id }.count().toInt()
-        PatchLibraryTable.deleteWhere { SqlExpressionBuilder.run { PatchLibraryTable.id eq id } }
+        val storedFile = existing[schema.library.file]
+        val detached = schema.attachments.selectAll().where { schema.attachments.patchId eq id }.count().toInt()
+        schema.library.deleteWhere { SqlExpressionBuilder.run { schema.library.id eq id } }
         Result.Ok(PatchDeleteResult(id, storedFile.ifBlank { null }, detached))
     }
 
@@ -361,15 +381,15 @@ class AppConfig(private val db: AppDatabase) {
      * updated, since the new file may add/remove/rename sub-patches or
      * options and stale overrides could reference things that no longer
      * exist. */
-    suspend fun resetPatchCustomizations(patchId: String): Int = db.tx {
-        val rows = PatchAttachments.selectAll().where { PatchAttachments.patchId eq patchId }.toList()
+    suspend fun resetPatchCustomizations(schema: PatchSchema, patchId: String): Int = db.tx {
+        val rows = schema.attachments.selectAll().where { schema.attachments.patchId eq patchId }.toList()
         var reset = 0
         for (row in rows) {
-            val hadOverrides = row[PatchAttachments.patchSelectionJson] != "{}" ||
-                row[PatchAttachments.optionOverridesJson] != "{}"
+            val hadOverrides = row[schema.attachments.patchSelectionJson] != "{}" ||
+                row[schema.attachments.optionOverridesJson] != "{}"
             if (hadOverrides) reset++
         }
-        PatchAttachments.update({ PatchAttachments.patchId eq patchId }) {
+        schema.attachments.update({ schema.attachments.patchId eq patchId }) {
             it[patchSelectionJson] = "{}"
             it[optionOverridesJson] = "{}"
         }
@@ -380,8 +400,8 @@ class AppConfig(private val db: AppDatabase) {
      * call alongside [resetPatchCustomizations] when a library patch's
      * content changes, so the next check re-patches with the new file
      * instead of skipping versions already processed with the old one. */
-    suspend fun invalidatePatchCache(patchId: String): Int = db.tx {
-        PatchCheckedEntries.deleteWhere { SqlExpressionBuilder.run { PatchCheckedEntries.patchId eq patchId } }
+    suspend fun invalidatePatchCache(schema: PatchSchema, patchId: String): Int = db.tx {
+        schema.checkedEntries.deleteWhere { SqlExpressionBuilder.run { schema.checkedEntries.patchId eq patchId } }
     }
 
     // ---------------------------------------------------------------------
@@ -429,55 +449,55 @@ class AppConfig(private val db: AppDatabase) {
     private fun toStringList(value: String): List<String> =
         value.split(",").map { it.trim() }.filter { it.isNotEmpty() }
 
-    private fun attachmentsFor(targetId: String): List<PatchAttachmentView> {
-        val library = PatchLibraryTable.selectAll().associateBy({ it[PatchLibraryTable.id] }, { it })
-        return PatchAttachments.selectAll().where { PatchAttachments.targetId eq targetId }.map { row ->
-            val patchId = row[PatchAttachments.patchId]
+    private fun attachmentsFor(schema: PatchSchema, targetId: String): List<PatchAttachmentView> {
+        val library = schema.library.selectAll().associateBy({ it[schema.library.id] }, { it })
+        return schema.attachments.selectAll().where { schema.attachments.targetId eq targetId }.map { row ->
+            val patchId = row[schema.attachments.patchId]
             val libRow = library[patchId]
             val patchSelection: Map<String, Boolean> = runCatching {
-                json.decodeFromString<Map<String, Boolean>>(row[PatchAttachments.patchSelectionJson])
+                json.decodeFromString<Map<String, Boolean>>(row[schema.attachments.patchSelectionJson])
             }.getOrDefault(emptyMap())
             val optionOverrides: Map<String, Map<String, String>> = runCatching {
-                json.decodeFromString<Map<String, Map<String, String>>>(row[PatchAttachments.optionOverridesJson])
+                json.decodeFromString<Map<String, Map<String, String>>>(row[schema.attachments.optionOverridesJson])
             }.getOrDefault(emptyMap())
             PatchAttachmentView(
                 patchId = patchId,
-                patchName = libRow?.get(PatchLibraryTable.name) ?: patchId,
-                patchVersion = libRow?.get(PatchLibraryTable.version) ?: "",
-                supportedVersions = toStringList(row[PatchAttachments.supportedVersions]),
-                patchArgs = row[PatchAttachments.patchArgs],
-                includeExperimentalVersions = row[PatchAttachments.includeExperimentalVersions],
+                patchName = libRow?.get(schema.library.name) ?: patchId,
+                patchVersion = libRow?.get(schema.library.version) ?: "",
+                supportedVersions = toStringList(row[schema.attachments.supportedVersions]),
+                patchArgs = row[schema.attachments.patchArgs],
+                includeExperimentalVersions = row[schema.attachments.includeExperimentalVersions],
                 patchSelection = patchSelection,
                 optionOverrides = optionOverrides,
             )
         }
     }
 
-    private fun checkedEntriesForTarget(targetId: String): List<PatchCheckedEntry> =
-        PatchCheckedEntries.selectAll().where { PatchCheckedEntries.targetId eq targetId }
-            .orderBy(PatchCheckedEntries.processedAt, SortOrder.DESC)
+    private fun checkedEntriesForTarget(schema: PatchSchema, targetId: String): List<PatchCheckedEntry> =
+        schema.checkedEntries.selectAll().where { schema.checkedEntries.targetId eq targetId }
+            .orderBy(schema.checkedEntries.processedAt, SortOrder.DESC)
             .map { row ->
                 PatchCheckedEntry(
-                    cacheKey = row[PatchCheckedEntries.cacheKey],
-                    version = row[PatchCheckedEntries.version],
-                    patchId = row[PatchCheckedEntries.patchId],
-                    patchVersion = row[PatchCheckedEntries.patchVersion],
-                    processedAt = row[PatchCheckedEntries.processedAt],
-                    output = row[PatchCheckedEntries.output],
+                    cacheKey = row[schema.checkedEntries.cacheKey],
+                    version = row[schema.checkedEntries.version],
+                    patchId = row[schema.checkedEntries.patchId],
+                    patchVersion = row[schema.checkedEntries.patchVersion],
+                    processedAt = row[schema.checkedEntries.processedAt],
+                    output = row[schema.checkedEntries.output],
                 )
             }
 
-    suspend fun listPatchTargets(): List<PatchTargetView> = db.tx {
-        PatchTargets.selectAll().map { row ->
-            val id = row[PatchTargets.id]
+    suspend fun listPatchTargets(schema: PatchSchema): List<PatchTargetView> = db.tx {
+        schema.targets.selectAll().map { row ->
+            val id = row[schema.targets.id]
             PatchTargetView(
                 id = id,
-                name = row[PatchTargets.name],
-                apkmirrorUrl = row[PatchTargets.apkmirrorUrl],
-                packageName = row[PatchTargets.packageName],
-                enabled = row[PatchTargets.enabled],
-                patches = attachmentsFor(id),
-                checkedEntries = checkedEntriesForTarget(id),
+                name = row[schema.targets.name],
+                apkmirrorUrl = row[schema.targets.apkmirrorUrl],
+                packageName = row[schema.targets.packageName],
+                enabled = row[schema.targets.enabled],
+                patches = attachmentsFor(schema, id),
+                checkedEntries = checkedEntriesForTarget(schema, id),
             )
         }
     }
@@ -491,13 +511,13 @@ class AppConfig(private val db: AppDatabase) {
         val enabled: Boolean = true,
     )
 
-    suspend fun addPatchTarget(payload: PatchTargetPayload): Result<PatchTargetPayload> = db.tx {
+    suspend fun addPatchTarget(schema: PatchSchema, payload: PatchTargetPayload): Result<PatchTargetPayload> = db.tx {
         if (!isValidSlug(payload.id)) return@tx Result.Error("A valid id (letters, numbers, - and _ only) is required")
         if (payload.apkmirrorUrl.isBlank()) return@tx Result.Error("APKMirror URL is required")
-        if (PatchTargets.selectAll().where { PatchTargets.id eq payload.id }.any()) {
+        if (schema.targets.selectAll().where { schema.targets.id eq payload.id }.any()) {
             return@tx Result.Error("A patch target with id \"${payload.id}\" already exists")
         }
-        PatchTargets.insert {
+        schema.targets.insert {
             it[id] = payload.id
             it[name] = payload.name.ifBlank { payload.id }
             it[apkmirrorUrl] = payload.apkmirrorUrl
@@ -507,9 +527,9 @@ class AppConfig(private val db: AppDatabase) {
         Result.Ok(payload)
     }
 
-    suspend fun updatePatchTarget(id: String, payload: PatchTargetPayload): Result<PatchTargetPayload> = db.tx {
+    suspend fun updatePatchTarget(schema: PatchSchema, id: String, payload: PatchTargetPayload): Result<PatchTargetPayload> = db.tx {
         if (payload.apkmirrorUrl.isBlank()) return@tx Result.Error("APKMirror URL is required")
-        val updated = PatchTargets.update({ PatchTargets.id eq id }) {
+        val updated = schema.targets.update({ schema.targets.id eq id }) {
             it[name] = payload.name.ifBlank { id }
             it[apkmirrorUrl] = payload.apkmirrorUrl
             it[packageName] = payload.packageName
@@ -520,8 +540,8 @@ class AppConfig(private val db: AppDatabase) {
 
     /** Deleting a target cascades to its `patch_attachments` and
      * `patch_checked_entries` rows via `ON DELETE CASCADE`. */
-    suspend fun deletePatchTarget(id: String): Result<String> = db.tx {
-        val deleted = PatchTargets.deleteWhere { SqlExpressionBuilder.run { PatchTargets.id eq id } }
+    suspend fun deletePatchTarget(schema: PatchSchema, id: String): Result<String> = db.tx {
+        val deleted = schema.targets.deleteWhere { SqlExpressionBuilder.run { schema.targets.id eq id } }
         if (deleted == 0) Result.Error("Patch target not found") else Result.Ok(id)
     }
 
@@ -542,34 +562,34 @@ class AppConfig(private val db: AppDatabase) {
      * Patches" UI save just patch_selection/option_overrides without
      * clobbering supported_versions, and vice versa.
      */
-    suspend fun attachPatchToTarget(targetId: String, payload: AttachPayload): Result<PatchAttachmentView> = db.tx {
-        if (!PatchTargets.selectAll().where { PatchTargets.id eq targetId }.any()) {
+    suspend fun attachPatchToTarget(schema: PatchSchema, targetId: String, payload: AttachPayload): Result<PatchAttachmentView> = db.tx {
+        if (!schema.targets.selectAll().where { schema.targets.id eq targetId }.any()) {
             return@tx Result.Error("Patch target not found")
         }
         if (payload.patchId.isBlank()) return@tx Result.Error("patch_id is required")
-        val libRow = PatchLibraryTable.selectAll().where { PatchLibraryTable.id eq payload.patchId }.singleOrNull()
+        val libRow = schema.library.selectAll().where { schema.library.id eq payload.patchId }.singleOrNull()
             ?: return@tx Result.Error("Patch \"${payload.patchId}\" not found in the library")
 
-        val existing = PatchAttachments.selectAll()
-            .where { (PatchAttachments.targetId eq targetId) and (PatchAttachments.patchId eq payload.patchId) }
+        val existing = schema.attachments.selectAll()
+            .where { (schema.attachments.targetId eq targetId) and (schema.attachments.patchId eq payload.patchId) }
             .singleOrNull()
 
         val supportedVersions = payload.supportedVersions?.let { toStringList(it) }
-            ?: existing?.get(PatchAttachments.supportedVersions)?.let { toStringList(it) }
+            ?: existing?.get(schema.attachments.supportedVersions)?.let { toStringList(it) }
             ?: emptyList()
-        val patchArgs = payload.patchArgs ?: existing?.get(PatchAttachments.patchArgs) ?: ""
+        val patchArgs = payload.patchArgs ?: existing?.get(schema.attachments.patchArgs) ?: ""
         val patchSelection = payload.patchSelection
-            ?: existing?.get(PatchAttachments.patchSelectionJson)?.let {
+            ?: existing?.get(schema.attachments.patchSelectionJson)?.let {
                 runCatching { json.decodeFromString<Map<String, Boolean>>(it) }.getOrDefault(emptyMap())
             }
             ?: emptyMap()
         val optionOverrides = payload.optionOverrides
-            ?: existing?.get(PatchAttachments.optionOverridesJson)?.let {
+            ?: existing?.get(schema.attachments.optionOverridesJson)?.let {
                 runCatching { json.decodeFromString<Map<String, Map<String, String>>>(it) }.getOrDefault(emptyMap())
             }
             ?: emptyMap()
         val includeExperimentalVersions = payload.includeExperimentalVersions
-            ?: existing?.get(PatchAttachments.includeExperimentalVersions)
+            ?: existing?.get(schema.attachments.includeExperimentalVersions)
             ?: false
 
         val supportedVersionsStr = supportedVersions.joinToString(",")
@@ -577,30 +597,30 @@ class AppConfig(private val db: AppDatabase) {
         val optionOverridesStr = json.encodeToString(optionOverrides)
 
         if (existing != null) {
-            PatchAttachments.update({ (PatchAttachments.targetId eq targetId) and (PatchAttachments.patchId eq payload.patchId) }) {
-                it[PatchAttachments.supportedVersions] = supportedVersionsStr
-                it[PatchAttachments.patchArgs] = patchArgs
+            schema.attachments.update({ (schema.attachments.targetId eq targetId) and (schema.attachments.patchId eq payload.patchId) }) {
+                it[schema.attachments.supportedVersions] = supportedVersionsStr
+                it[schema.attachments.patchArgs] = patchArgs
                 it[patchSelectionJson] = patchSelectionStr
                 it[optionOverridesJson] = optionOverridesStr
-                it[PatchAttachments.includeExperimentalVersions] = includeExperimentalVersions
+                it[schema.attachments.includeExperimentalVersions] = includeExperimentalVersions
             }
         } else {
-            PatchAttachments.insert {
-                it[PatchAttachments.targetId] = targetId
+            schema.attachments.insert {
+                it[schema.attachments.targetId] = targetId
                 it[patchId] = payload.patchId
-                it[PatchAttachments.supportedVersions] = supportedVersionsStr
-                it[PatchAttachments.patchArgs] = patchArgs
+                it[schema.attachments.supportedVersions] = supportedVersionsStr
+                it[schema.attachments.patchArgs] = patchArgs
                 it[patchSelectionJson] = patchSelectionStr
                 it[optionOverridesJson] = optionOverridesStr
-                it[PatchAttachments.includeExperimentalVersions] = includeExperimentalVersions
+                it[schema.attachments.includeExperimentalVersions] = includeExperimentalVersions
             }
         }
 
         Result.Ok(
             PatchAttachmentView(
                 patchId = payload.patchId,
-                patchName = libRow[PatchLibraryTable.name],
-                patchVersion = libRow[PatchLibraryTable.version],
+                patchName = libRow[schema.library.name],
+                patchVersion = libRow[schema.library.version],
                 supportedVersions = supportedVersions,
                 patchArgs = patchArgs,
                 includeExperimentalVersions = includeExperimentalVersions,
@@ -610,16 +630,16 @@ class AppConfig(private val db: AppDatabase) {
         )
     }
 
-    suspend fun detachPatchFromTarget(targetId: String, patchId: String): Result<String> = db.tx {
-        val deleted = PatchAttachments.deleteWhere {
-            SqlExpressionBuilder.run { (PatchAttachments.targetId eq targetId) and (PatchAttachments.patchId eq patchId) }
+    suspend fun detachPatchFromTarget(schema: PatchSchema, targetId: String, patchId: String): Result<String> = db.tx {
+        val deleted = schema.attachments.deleteWhere {
+            SqlExpressionBuilder.run { (schema.attachments.targetId eq targetId) and (schema.attachments.patchId eq patchId) }
         }
         if (deleted == 0) Result.Error("Attachment not found") else Result.Ok(patchId)
     }
 
-    suspend fun deletePatchCheckedEntry(targetId: String, cacheKey: String): Boolean = db.tx {
-        val deleted = PatchCheckedEntries.deleteWhere {
-            SqlExpressionBuilder.run { (PatchCheckedEntries.targetId eq targetId) and (PatchCheckedEntries.cacheKey eq cacheKey) }
+    suspend fun deletePatchCheckedEntry(schema: PatchSchema, targetId: String, cacheKey: String): Boolean = db.tx {
+        val deleted = schema.checkedEntries.deleteWhere {
+            SqlExpressionBuilder.run { (schema.checkedEntries.targetId eq targetId) and (schema.checkedEntries.cacheKey eq cacheKey) }
         }
         deleted > 0
     }
@@ -701,26 +721,26 @@ class AppConfig(private val db: AppDatabase) {
         val patches: List<PatchAttachmentView>,
     )
 
-    suspend fun listEnabledPatchTargets(): List<EnabledPatchTarget> = db.tx {
-        PatchTargets.selectAll().where { PatchTargets.enabled eq true }.map { row ->
-            val id = row[PatchTargets.id]
-            EnabledPatchTarget(id, row[PatchTargets.apkmirrorUrl], row[PatchTargets.packageName], attachmentsFor(id))
+    suspend fun listEnabledPatchTargets(schema: PatchSchema): List<EnabledPatchTarget> = db.tx {
+        schema.targets.selectAll().where { schema.targets.enabled eq true }.map { row ->
+            val id = row[schema.targets.id]
+            EnabledPatchTarget(id, row[schema.targets.apkmirrorUrl], row[schema.targets.packageName], attachmentsFor(schema, id))
         }
     }
 
     data class PatchLibraryEntry(val id: String, val name: String, val file: String, val version: String)
 
-    suspend fun patchLibraryById(): Map<String, PatchLibraryEntry> = db.tx {
-        PatchLibraryTable.selectAll().associate {
-            it[PatchLibraryTable.id] to PatchLibraryEntry(
-                it[PatchLibraryTable.id], it[PatchLibraryTable.name], it[PatchLibraryTable.file], it[PatchLibraryTable.version],
+    suspend fun patchLibraryById(schema: PatchSchema): Map<String, PatchLibraryEntry> = db.tx {
+        schema.library.selectAll().associate {
+            it[schema.library.id] to PatchLibraryEntry(
+                it[schema.library.id], it[schema.library.name], it[schema.library.file], it[schema.library.version],
             )
         }
     }
 
-    suspend fun processedPatchCacheKeys(targetId: String): Set<String> = db.tx {
-        PatchCheckedEntries.selectAll().where { PatchCheckedEntries.targetId eq targetId }
-            .map { it[PatchCheckedEntries.cacheKey] }
+    suspend fun processedPatchCacheKeys(schema: PatchSchema, targetId: String): Set<String> = db.tx {
+        schema.checkedEntries.selectAll().where { schema.checkedEntries.targetId eq targetId }
+            .map { it[schema.checkedEntries.cacheKey] }
             .toSet()
     }
 
@@ -728,6 +748,7 @@ class AppConfig(private val db: AppDatabase) {
      * the SQL replacement for `patchCacheStore.update { ... }` in
      * `PatchScheduler.checkTarget`. */
     suspend fun recordPatchCheckedEntry(
+        schema: PatchSchema,
         targetId: String,
         cacheKey: String,
         version: String,
@@ -735,27 +756,27 @@ class AppConfig(private val db: AppDatabase) {
         patchVersion: String,
         output: String,
     ) = db.tx {
-        val exists = PatchCheckedEntries.selectAll()
-            .where { (PatchCheckedEntries.targetId eq targetId) and (PatchCheckedEntries.cacheKey eq cacheKey) }
+        val exists = schema.checkedEntries.selectAll()
+            .where { (schema.checkedEntries.targetId eq targetId) and (schema.checkedEntries.cacheKey eq cacheKey) }
             .any()
         val processedAt = now()
         if (exists) {
-            PatchCheckedEntries.update({ (PatchCheckedEntries.targetId eq targetId) and (PatchCheckedEntries.cacheKey eq cacheKey) }) {
-                it[PatchCheckedEntries.version] = version
-                it[PatchCheckedEntries.patchId] = patchId
-                it[PatchCheckedEntries.patchVersion] = patchVersion
-                it[PatchCheckedEntries.processedAt] = processedAt
-                it[PatchCheckedEntries.output] = output
+            schema.checkedEntries.update({ (schema.checkedEntries.targetId eq targetId) and (schema.checkedEntries.cacheKey eq cacheKey) }) {
+                it[schema.checkedEntries.version] = version
+                it[schema.checkedEntries.patchId] = patchId
+                it[schema.checkedEntries.patchVersion] = patchVersion
+                it[schema.checkedEntries.processedAt] = processedAt
+                it[schema.checkedEntries.output] = output
             }
         } else {
-            PatchCheckedEntries.insert {
-                it[PatchCheckedEntries.targetId] = targetId
-                it[PatchCheckedEntries.cacheKey] = cacheKey
-                it[PatchCheckedEntries.version] = version
-                it[PatchCheckedEntries.patchId] = patchId
-                it[PatchCheckedEntries.patchVersion] = patchVersion
-                it[PatchCheckedEntries.processedAt] = processedAt
-                it[PatchCheckedEntries.output] = output
+            schema.checkedEntries.insert {
+                it[schema.checkedEntries.targetId] = targetId
+                it[schema.checkedEntries.cacheKey] = cacheKey
+                it[schema.checkedEntries.version] = version
+                it[schema.checkedEntries.patchId] = patchId
+                it[schema.checkedEntries.patchVersion] = patchVersion
+                it[schema.checkedEntries.processedAt] = processedAt
+                it[schema.checkedEntries.output] = output
             }
         }
     }

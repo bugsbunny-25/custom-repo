@@ -33,12 +33,13 @@ class PatchScheduler(
     private val tmpDir: File,
     private val fdroidRepoManager: FdroidRepoManager,
     private val signing: PatchApplier.SigningConfig,
+    private val schema: AppConfig.PatchSchema = AppConfig.PatchSchemas.Mobile,
     private val logger: Logger = LoggerFactory.getLogger(PatchScheduler::class.java.name),
 ) {
     suspend fun checkForUpdates(): Boolean {
         refreshFlareSolverrUrl()
-        val library = appConfig.patchLibraryById()
-        val targets = appConfig.listEnabledPatchTargets()
+        val library = appConfig.patchLibraryById(schema)
+        val targets = appConfig.listEnabledPatchTargets(schema)
 
         var anyUpdated = false
         for (target in targets) {
@@ -68,8 +69,8 @@ class PatchScheduler(
      * whether a new patched version was published. */
     suspend fun runTargetNow(targetId: String): Boolean {
         refreshFlareSolverrUrl()
-        val library = appConfig.patchLibraryById()
-        val target = appConfig.listEnabledPatchTargets().firstOrNull { it.id == targetId }
+        val library = appConfig.patchLibraryById(schema)
+        val target = appConfig.listEnabledPatchTargets(schema).firstOrNull { it.id == targetId }
         if (target == null) {
             logger.warn("$targetId: not found or not enabled, skipping manual patch run")
             return false
@@ -92,8 +93,8 @@ class PatchScheduler(
      * could extract for every app. Returns whether anything was published. */
     suspend fun runSpecificVersion(targetId: String, version: String, versionPageUrl: String): Boolean {
         refreshFlareSolverrUrl()
-        val library = appConfig.patchLibraryById()
-        val target = appConfig.listEnabledPatchTargets().firstOrNull { it.id == targetId }
+        val library = appConfig.patchLibraryById(schema)
+        val target = appConfig.listEnabledPatchTargets(schema).firstOrNull { it.id == targetId }
         if (target == null) {
             logger.warn("$targetId: not found or not enabled, skipping specific-version patch run")
             return false
@@ -173,7 +174,7 @@ class PatchScheduler(
                     continue
                 }
 
-                val processed = appConfig.processedPatchCacheKeys(target.id)
+                val processed = appConfig.processedPatchCacheKeys(schema, target.id)
                 val supportedVersions = attachment.supportedVersions.ifEmpty {
                     val derived = deriveSupportedVersions(libEntry, target.packageName)
                     if (attachment.includeExperimentalVersions) {
@@ -289,6 +290,7 @@ class PatchScheduler(
                     return false
                 }
                 appConfig.recordPatchCheckedEntry(
+                    schema = schema,
                     targetId = target.id,
                     cacheKey = cacheKey,
                     version = version,

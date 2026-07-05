@@ -22,7 +22,13 @@ data class SettingsResponse(val settings: AppConfig.SettingsView)
  * `repo_name`/`repo_description`/`repo_icon` are editable and re-applied to
  * both F-Droid repo dirs' own `config.yml` on save.
  */
-fun Route.settingsRoutes(appConfig: AppConfig, fdroidRepoManager: FdroidRepoManager, repoDir: File, patchedRepoDir: File) {
+fun Route.settingsRoutes(
+    appConfig: AppConfig,
+    fdroidRepoManager: FdroidRepoManager,
+    repoDir: File,
+    patchedRepoDir: File,
+    patchedTvRepoDir: File,
+) {
     get("/api/settings") {
         call.respond(SettingsResponse(appConfig.getSettings()))
     }
@@ -38,6 +44,10 @@ fun Route.settingsRoutes(appConfig: AppConfig, fdroidRepoManager: FdroidRepoMana
             fdroidRepoManager.writeRepoMetadata(
                 patchedRepoDir, updated.repoName, updated.repoDescription,
                 FdroidRepoManager.patchedRepoUrl(updated.repoUrl), updated.repoIcon,
+            )
+            fdroidRepoManager.writeRepoMetadata(
+                patchedTvRepoDir, updated.repoName, updated.repoDescription,
+                FdroidRepoManager.patchedTvRepoUrl(updated.repoUrl), updated.repoIcon,
             )
         }
         call.respond(SettingsResponse(updated))

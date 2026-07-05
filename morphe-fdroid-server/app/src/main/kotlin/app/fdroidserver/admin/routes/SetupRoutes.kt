@@ -30,7 +30,13 @@ data class SetupOkResponse(val ok: Boolean = true, val settings: AppConfig.Setti
  * append the `/repo`/`/patched/repo` suffixes each repo dir's own
  * `config.yml` needs to match where nginx actually serves it.
  */
-fun Route.setupRoutes(appConfig: AppConfig, fdroidRepoManager: FdroidRepoManager, repoDir: File, patchedRepoDir: File) {
+fun Route.setupRoutes(
+    appConfig: AppConfig,
+    fdroidRepoManager: FdroidRepoManager,
+    repoDir: File,
+    patchedRepoDir: File,
+    patchedTvRepoDir: File,
+) {
     get("/api/setup/status") {
         call.respond(SetupStatusResponse(appConfig.isInitialized()))
     }
@@ -47,6 +53,10 @@ fun Route.setupRoutes(appConfig: AppConfig, fdroidRepoManager: FdroidRepoManager
                 fdroidRepoManager.writeRepoMetadata(
                     patchedRepoDir, payload.repoName, payload.repoDescription,
                     FdroidRepoManager.patchedRepoUrl(payload.repoUrl), payload.repoIcon,
+                )
+                fdroidRepoManager.writeRepoMetadata(
+                    patchedTvRepoDir, payload.repoName, payload.repoDescription,
+                    FdroidRepoManager.patchedTvRepoUrl(payload.repoUrl), payload.repoIcon,
                 )
                 call.respond(HttpStatusCode.Created, SetupOkResponse(settings = result.value))
             }

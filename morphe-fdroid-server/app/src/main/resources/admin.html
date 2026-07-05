@@ -176,7 +176,7 @@
         <div class="field">
           <label for="setupRepoUrl">Repo base URL</label>
           <input id="setupRepoUrl" type="text" required placeholder="https://fdroid.yourdomain.com" />
-          <p class="hint">Just the domain (no path) - <code>/repo</code> and <code>/patched/repo</code> are appended automatically for the main and patched repos. Locked once setup is complete.</p>
+          <p class="hint">Just the domain (no path) - <code>/repo</code>, <code>/patched/repo</code>, and <code>/patched-tv/repo</code> are appended automatically for the main, patched, and patched-TV repos. Locked once setup is complete.</p>
         </div>
         <div class="field">
           <label for="setupRepoIcon">Repo icon filename (optional)</label>
@@ -194,6 +194,7 @@
     <div class="tabs">
       <button class="tab-btn active" id="githubTabBtn" data-tab="githubPanel">GitHub</button>
       <button class="tab-btn" id="patchingTabBtn" data-tab="patchingPanel">Patching</button>
+      <button class="tab-btn" id="patchingTvTabBtn" data-tab="patchingTvPanel">Patched TV</button>
       <button class="tab-btn" id="settingsTabBtn" data-tab="settingsPanel">Settings</button>
     </div>
 
@@ -264,6 +265,50 @@
       </div>
     </div>
 
+    <div id="patchingTvPanel" class="tab-panel">
+      <h1>Patch Library (TV)</h1>
+      <p class="sub">A separate patch library and app-target list from the "Patching" tab above, published to its own /patched-tv F-Droid repo - use this for TV builds of an app that would otherwise collide with the mobile build's package name in /patched/repo.</p>
+      <div style="margin: 0 0 12px;">
+        <button id="newLibraryPatchBtnTv" class="btn">Upload Patch</button>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>File</th>
+              <th>Version</th>
+              <th>Updated</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="libraryRowsTv"></tbody>
+        </table>
+      </div>
+
+      <h1 style="margin-top: 32px;">Patched Apps (TV)</h1>
+      <p class="sub">Watch an APKMirror app page for new versions and publish patched builds to the /patched-tv/repo F-Droid repo. Only the newest 3 versions per (app, patch) are kept.</p>
+      <div style="margin: 0 0 12px; display: flex; gap: 8px;">
+        <button id="newPatchBtnTv" class="btn">New Patch Target</button>
+        <button id="patchAllBtnTv" class="btn ghost">Patch All</button>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>App</th>
+              <th>APKMirror</th>
+              <th>Attached patches</th>
+              <th>Patched versions</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="patchRowsTv"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div id="settingsPanel" class="tab-panel">
       <h1>Settings</h1>
       <p class="sub">Every setting the app uses, in one place. Fields marked read-only were fixed during first-run setup.</p>
@@ -290,6 +335,11 @@
             <div class="field">
               <label>Patched repo URL</label>
               <div id="settingsPatchedRepoUrl" class="readonly-field"></div>
+              <p class="hint">Locked after setup - changing this would break existing F-Droid client subscriptions.</p>
+            </div>
+            <div class="field">
+              <label>Patched TV repo URL</label>
+              <div id="settingsPatchedTvRepoUrl" class="readonly-field"></div>
               <p class="hint">Locked after setup - changing this would break existing F-Droid client subscriptions.</p>
             </div>
           </div>
@@ -668,13 +718,23 @@
       });
     });
 
-    // ---- Patch Library ----
-    const libraryRows = document.getElementById('libraryRows');
+    // ---- Patch Library + Patch Targets ----
+    // "Patching" (mobile) and "Patched TV" are fully independent data sets
+    // (own library, own targets/attachments/history), each with their own
+    // table + "New"/"Patch All" buttons (ids suffixed per CHANNELS below),
+    // but they share this same code and the modals beneath it - only one
+    // modal can be open at a time, so it operates against whichever
+    // channel's `open*` call last set `activeChannel`.
+    const CHANNELS = {
+      mobile: { suffix: '', apiLibrary: '/api/patch-library', apiTargets: '/api/patch-targets', libraryById: {}, targetsById: {} },
+      tv: { suffix: 'Tv', apiLibrary: '/api/patch-library-tv', apiTargets: '/api/patch-targets-tv', libraryById: {}, targetsById: {} },
+    };
+    let activeChannel = CHANNELS.mobile;
+
     const libraryOverlay = document.getElementById('libraryOverlay');
     const libraryForm = document.getElementById('libraryForm');
     const libraryMsg = document.getElementById('libraryMsg');
     let libraryFormMode = 'new';
-    let libraryById = {};
 
     async function readFileAsBase64(file) {
       return new Promise((resolve, reject) => {
@@ -685,17 +745,18 @@
       });
     }
 
-    async function loadLibrary() {
-      const res = await fetch('/api/patch-library');
+    async function loadLibrary(channel) {
+      const libraryRows = document.getElementById('libraryRows' + channel.suffix);
+      const res = await fetch(channel.apiLibrary);
       const data = await res.json();
       libraryRows.innerHTML = '';
-      libraryById = {};
+      channel.libraryById = {};
 
       if (!data.library.length) {
         libraryRows.innerHTML = '<tr><td colspan="6">No patches uploaded yet.</td></tr>';
       } else {
         for (const patch of data.library) {
-          libraryById[patch.id] = patch;
+          channel.libraryById[patch.id] = patch;
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td>${escapeHtml(patch.id)}</td>
@@ -709,24 +770,25 @@
               <button class="btn ghost small" data-delete-patch="${patch.id}">Delete</button>
             </td>
           `;
-          tr.querySelector('[data-update-patch]').addEventListener('click', () => openLibraryEditor(patch));
-          tr.querySelector('[data-inspect-patch]').addEventListener('click', () => openInspect(patch.id, patch.name));
+          tr.querySelector('[data-update-patch]').addEventListener('click', () => openLibraryEditor(channel, patch));
+          tr.querySelector('[data-inspect-patch]').addEventListener('click', () => openInspect(channel, patch.id, patch.name));
           tr.querySelector('[data-delete-patch]').addEventListener('click', async () => {
             if (!confirm(`Delete patch "${patch.name}"? It will be detached from any app using it.`)) return;
-            const delRes = await fetch(`/api/patch-library/${patch.id}`, { method: 'DELETE' });
+            const delRes = await fetch(`${channel.apiLibrary}/${patch.id}`, { method: 'DELETE' });
             if (delRes.ok) {
-              await loadLibrary();
-              await loadPatchTargets();
+              await loadLibrary(channel);
+              await loadPatchTargets(channel);
             }
           });
           libraryRows.appendChild(tr);
         }
       }
 
-      populateAttachPatchOptions();
+      if (channel === activeChannel) populateAttachPatchOptions();
     }
 
-    function openNewLibraryPatch() {
+    function openNewLibraryPatch(channel) {
+      activeChannel = channel;
       libraryFormMode = 'new';
       libraryMsg.textContent = '';
       document.getElementById('libraryModalTitle').textContent = 'Upload Patch';
@@ -741,7 +803,8 @@
       libraryOverlay.classList.add('open');
     }
 
-    function openLibraryEditor(patch) {
+    function openLibraryEditor(channel, patch) {
+      activeChannel = channel;
       libraryFormMode = 'edit';
       libraryMsg.textContent = '';
       document.getElementById('libraryModalTitle').textContent = 'Update Patch';
@@ -756,7 +819,8 @@
       libraryOverlay.classList.add('open');
     }
 
-    document.getElementById('newLibraryPatchBtn').addEventListener('click', openNewLibraryPatch);
+    document.getElementById('newLibraryPatchBtn').addEventListener('click', () => openNewLibraryPatch(CHANNELS.mobile));
+    document.getElementById('newLibraryPatchBtnTv').addEventListener('click', () => openNewLibraryPatch(CHANNELS.tv));
     document.getElementById('libraryCancelBtn').addEventListener('click', () => {
       libraryOverlay.classList.remove('open');
     });
@@ -788,13 +852,13 @@
 
       let res;
       if (libraryFormMode === 'new') {
-        res = await fetch('/api/patch-library', {
+        res = await fetch(activeChannel.apiLibrary, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(payload),
         });
       } else {
-        res = await fetch(`/api/patch-library/${originalId}`, {
+        res = await fetch(`${activeChannel.apiLibrary}/${originalId}`, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(payload),
@@ -808,8 +872,8 @@
       }
 
       libraryOverlay.classList.remove('open');
-      await loadLibrary();
-      await loadPatchTargets();
+      await loadLibrary(activeChannel);
+      await loadPatchTargets(activeChannel);
     });
 
     // ---- Inspect a library patch's packages/versions ----
@@ -817,7 +881,8 @@
     const inspectBody = document.getElementById('inspectBody');
     const inspectMsg = document.getElementById('inspectMsg');
 
-    async function openInspect(patchId, patchName) {
+    async function openInspect(channel, patchId, patchName) {
+      activeChannel = channel;
       inspectMsg.textContent = '';
       document.getElementById('inspectModalTitle').textContent = `Patch Contents — ${patchName}`;
       inspectBody.innerHTML = '<div class="entry-meta">Reading patch file…</div>';
@@ -825,7 +890,7 @@
 
       let res, data;
       try {
-        res = await fetch(`/api/patch-library/${patchId}/inspect`);
+        res = await fetch(`${channel.apiLibrary}/${patchId}/inspect`);
         data = await res.json();
       } catch (e) {
         inspectBody.innerHTML = '';
@@ -892,7 +957,6 @@
     });
 
     // ---- Patch Targets (apps) ----
-    const patchRows = document.getElementById('patchRows');
     const patchOverlay = document.getElementById('patchOverlay');
     const patchForm = document.getElementById('patchForm');
     const patchMsg = document.getElementById('patchMsg');
@@ -903,19 +967,19 @@
     const attachForm = document.getElementById('attachForm');
     const attachMsg = document.getElementById('attachMsg');
     const attachPatchSelect = document.getElementById('attachPatchId');
-    let targetsById = {};
 
     function populateAttachPatchOptions() {
-      attachPatchSelect.innerHTML = Object.values(libraryById)
+      attachPatchSelect.innerHTML = Object.values(activeChannel.libraryById)
         .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`)
         .join('');
     }
 
-    async function loadPatchTargets() {
-      const res = await fetch('/api/patch-targets');
+    async function loadPatchTargets(channel) {
+      const patchRows = document.getElementById('patchRows' + channel.suffix);
+      const res = await fetch(channel.apiTargets);
       const data = await res.json();
       patchRows.innerHTML = '';
-      targetsById = {};
+      channel.targetsById = {};
 
       if (!data.targets.length) {
         patchRows.innerHTML = '<tr><td colspan="5">No patch targets configured.</td></tr>';
@@ -923,7 +987,7 @@
       }
 
       for (const target of data.targets) {
-        targetsById[target.id] = target;
+        channel.targetsById[target.id] = target;
 
         const attachedHtml = target.patches.length
           ? target.patches.map((a) => `<span class="pill">${escapeHtml(a.patch_name)} (${(a.supported_versions || []).length ? escapeHtml(a.supported_versions.join(', ')) : 'from .mpp'})</span>`).join(' ')
@@ -962,39 +1026,40 @@
           const originalText = btn.textContent;
           btn.textContent = 'Patching…';
           try {
-            const res = await fetch(`/api/patch-targets/${target.id}/run`, { method: 'POST' });
+            const res = await fetch(`${channel.apiTargets}/${target.id}/run`, { method: 'POST' });
             const result = await res.json();
             if (!res.ok) {
               alert(result.error || 'Failed to patch');
               return;
             }
-            await loadPatchTargets();
+            await loadPatchTargets(channel);
           } finally {
             btn.disabled = false;
             btn.textContent = originalText;
           }
         });
-        tr.querySelector('[data-patch-version]').addEventListener('click', () => openVersionModal(target.id));
-        tr.querySelector('[data-edit-target]').addEventListener('click', () => openPatchEditor(target));
-        tr.querySelector('[data-manage-attachments]').addEventListener('click', () => openAttachManager(target.id));
+        tr.querySelector('[data-patch-version]').addEventListener('click', () => openVersionModal(channel, target.id));
+        tr.querySelector('[data-edit-target]').addEventListener('click', () => openPatchEditor(channel, target));
+        tr.querySelector('[data-manage-attachments]').addEventListener('click', () => openAttachManager(channel, target.id));
         tr.querySelector('[data-delete-target]').addEventListener('click', async () => {
           if (!confirm(`Delete patch target "${target.name}"?`)) return;
-          const delRes = await fetch(`/api/patch-targets/${target.id}`, { method: 'DELETE' });
-          if (delRes.ok) await loadPatchTargets();
+          const delRes = await fetch(`${channel.apiTargets}/${target.id}`, { method: 'DELETE' });
+          if (delRes.ok) await loadPatchTargets(channel);
         });
         tr.querySelectorAll('[data-target-id]').forEach((btn) => {
           btn.addEventListener('click', async () => {
             const targetId = btn.getAttribute('data-target-id');
             const cacheKey = btn.getAttribute('data-cache-key');
-            const delRes = await fetch(`/api/patch-targets/${targetId}/checked/${cacheKey}`, { method: 'DELETE' });
-            if (delRes.ok) await loadPatchTargets();
+            const delRes = await fetch(`${channel.apiTargets}/${targetId}/checked/${cacheKey}`, { method: 'DELETE' });
+            if (delRes.ok) await loadPatchTargets(channel);
           });
         });
         patchRows.appendChild(tr);
       }
     }
 
-    function openPatchEditor(target) {
+    function openPatchEditor(channel, target) {
+      activeChannel = channel;
       patchFormMode = 'edit';
       patchMsg.textContent = '';
       document.getElementById('patchModalTitle').textContent = 'Edit Patch Target';
@@ -1008,7 +1073,8 @@
       patchOverlay.classList.add('open');
     }
 
-    function openNewPatch() {
+    function openNewPatch(channel) {
+      activeChannel = channel;
       patchFormMode = 'new';
       patchMsg.textContent = '';
       document.getElementById('patchModalTitle').textContent = 'Add Patch Target';
@@ -1026,25 +1092,32 @@
       patchOverlay.classList.remove('open');
     }
 
-    document.getElementById('newPatchBtn').addEventListener('click', openNewPatch);
-    document.getElementById('patchAllBtn').addEventListener('click', async (e) => {
-      const btn = e.currentTarget;
-      btn.disabled = true;
-      const originalText = btn.textContent;
-      btn.textContent = 'Patching…';
-      try {
-        const res = await fetch('/api/patch-targets/run-all', { method: 'POST' });
-        const result = await res.json();
-        if (!res.ok) {
-          alert(result.error || 'Failed to patch all');
-          return;
+    document.getElementById('newPatchBtn').addEventListener('click', () => openNewPatch(CHANNELS.mobile));
+    document.getElementById('newPatchBtnTv').addEventListener('click', () => openNewPatch(CHANNELS.tv));
+
+    function wirePatchAllBtn(channel) {
+      document.getElementById('patchAllBtn' + channel.suffix).addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        const originalText = btn.textContent;
+        btn.textContent = 'Patching…';
+        try {
+          const res = await fetch(`${channel.apiTargets}/run-all`, { method: 'POST' });
+          const result = await res.json();
+          if (!res.ok) {
+            alert(result.error || 'Failed to patch all');
+            return;
+          }
+          await loadPatchTargets(channel);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = originalText;
         }
-        await loadPatchTargets();
-      } finally {
-        btn.disabled = false;
-        btn.textContent = originalText;
-      }
-    });
+      });
+    }
+    wirePatchAllBtn(CHANNELS.mobile);
+    wirePatchAllBtn(CHANNELS.tv);
+
     document.getElementById('patchCancelBtn').addEventListener('click', closePatchEditor);
     patchOverlay.addEventListener('click', (e) => {
       if (e.target === patchOverlay) closePatchEditor();
@@ -1064,13 +1137,13 @@
 
       let res;
       if (patchFormMode === 'new') {
-        res = await fetch('/api/patch-targets', {
+        res = await fetch(activeChannel.apiTargets, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(payload),
         });
       } else {
-        res = await fetch(`/api/patch-targets/${originalId}`, {
+        res = await fetch(`${activeChannel.apiTargets}/${originalId}`, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(payload),
@@ -1084,12 +1157,12 @@
       }
 
       closePatchEditor();
-      await loadPatchTargets();
+      await loadPatchTargets(activeChannel);
     });
 
     // ---- Attach / detach library patches on a target ----
     function renderAttachList(targetId) {
-      const target = targetsById[targetId];
+      const target = activeChannel.targetsById[targetId];
       attachList.innerHTML = '';
       if (!target || !target.patches.length) {
         attachList.innerHTML = '<div class="entry-meta">No patches attached yet.</div>';
@@ -1120,9 +1193,9 @@
           openConfigure(targetId, attachment.patch_id, attachment.patch_name);
         });
         row.querySelector('[data-detach-patch]').addEventListener('click', async () => {
-          const delRes = await fetch(`/api/patch-targets/${targetId}/attachments/${attachment.patch_id}`, { method: 'DELETE' });
+          const delRes = await fetch(`${activeChannel.apiTargets}/${targetId}/attachments/${attachment.patch_id}`, { method: 'DELETE' });
           if (delRes.ok) {
-            await loadPatchTargets();
+            await loadPatchTargets(activeChannel);
             renderAttachList(targetId);
           }
         });
@@ -1130,7 +1203,8 @@
       }
     }
 
-    function openAttachManager(targetId) {
+    function openAttachManager(channel, targetId) {
+      activeChannel = channel;
       attachMsg.textContent = '';
       document.getElementById('attachTargetId').value = targetId;
       populateAttachPatchOptions();
@@ -1149,7 +1223,8 @@
     const versionForm = document.getElementById('versionForm');
     const versionMsg = document.getElementById('versionMsg');
 
-    function openVersionModal(targetId) {
+    function openVersionModal(channel, targetId) {
+      activeChannel = channel;
       versionMsg.textContent = '';
       document.getElementById('versionTargetId').value = targetId;
       document.getElementById('versionNumber').value = '';
@@ -1176,7 +1251,7 @@
       const originalText = submitBtn.textContent;
       submitBtn.textContent = 'Patching…';
       try {
-        const res = await fetch(`/api/patch-targets/${targetId}/run-version`, {
+        const res = await fetch(`${activeChannel.apiTargets}/${targetId}/run-version`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ version, version_page_url: versionPageUrl }),
@@ -1187,7 +1262,7 @@
           return;
         }
         versionOverlay.classList.remove('open');
-        await loadPatchTargets();
+        await loadPatchTargets(activeChannel);
       } finally {
         submitBtn.disabled = false;
         submitBtn.textContent = originalText;
@@ -1211,7 +1286,7 @@
         include_experimental_versions: document.getElementById('attachIncludeExperimental').checked,
       };
 
-      const res = await fetch(`/api/patch-targets/${targetId}/attachments`, {
+      const res = await fetch(`${activeChannel.apiTargets}/${targetId}/attachments`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload),
@@ -1223,7 +1298,7 @@
       }
 
       attachForm.reset();
-      await loadPatchTargets();
+      await loadPatchTargets(activeChannel);
       renderAttachList(targetId);
     });
 
@@ -1247,7 +1322,7 @@
 
       let res, data;
       try {
-        res = await fetch(`/api/patch-library/${patchId}/inspect`);
+        res = await fetch(`${activeChannel.apiLibrary}/${patchId}/inspect`);
         data = await res.json();
       } catch (e) {
         configureBody.innerHTML = '';
@@ -1266,7 +1341,7 @@
         return;
       }
 
-      const target = targetsById[targetId];
+      const target = activeChannel.targetsById[targetId];
       const attachment = (target ? target.patches : []).find((a) => a.patch_id === patchId) || {};
       const currentSelection = attachment.patch_selection || {};
       const currentOverrides = attachment.option_overrides || {};
@@ -1346,7 +1421,7 @@
         });
       });
 
-      const res = await fetch(`/api/patch-targets/${targetId}/attachments`, {
+      const res = await fetch(`${activeChannel.apiTargets}/${targetId}/attachments`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ patch_id: patchId, patch_selection: patchSelection, option_overrides: optionOverrides }),
@@ -1358,7 +1433,7 @@
       }
 
       configureOverlay.classList.remove('open');
-      await loadPatchTargets();
+      await loadPatchTargets(activeChannel);
       renderAttachList(targetId);
     });
 
@@ -1376,6 +1451,7 @@
       const repoBaseUrl = (s.repo_url || '').replace(/\/+$/, '');
       document.getElementById('settingsRepoUrl').textContent = repoBaseUrl ? repoBaseUrl + '/repo' : '';
       document.getElementById('settingsPatchedRepoUrl').textContent = repoBaseUrl ? repoBaseUrl + '/patched/repo' : '';
+      document.getElementById('settingsPatchedTvRepoUrl').textContent = repoBaseUrl ? repoBaseUrl + '/patched-tv/repo' : '';
       document.getElementById('settingsGithubToken').value = s.github_token || '';
       document.getElementById('settingsUpdateInterval').value = s.update_interval;
       document.getElementById('settingsPatchCheckInterval').value = s.patch_check_interval ?? '';
@@ -1465,7 +1541,12 @@
       }
       setupScreen.style.display = 'none';
       mainScreen.style.display = 'block';
-      await Promise.all([loadRepos(), loadLibrary(), loadPatchTargets(), loadSettings()]);
+      await Promise.all([
+        loadRepos(),
+        loadLibrary(CHANNELS.mobile), loadPatchTargets(CHANNELS.mobile),
+        loadLibrary(CHANNELS.tv), loadPatchTargets(CHANNELS.tv),
+        loadSettings(),
+      ]);
     }
 
     boot();

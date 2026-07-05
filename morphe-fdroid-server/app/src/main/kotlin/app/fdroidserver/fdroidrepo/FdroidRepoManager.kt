@@ -175,5 +175,6 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
          */
         fun mainRepoUrl(baseUrl: String): String = baseUrl.trimEnd('/') + "/repo"
         fun patchedRepoUrl(baseUrl: String): String = baseUrl.trimEnd('/') + "/patched/repo"
+        fun patchedTvRepoUrl(baseUrl: String): String = baseUrl.trimEnd('/') + "/patched-tv/repo"
     }
 }

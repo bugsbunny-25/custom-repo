@@ -26,17 +26,21 @@ data class InspectResponse(val patchId: String, val patches: List<PatchLibrary.P
 
 /** The Patching tab's "Patch Library" API - upload/update/delete `.mpp`
  * files and introspect them, matching the Python version's
- * `/api/patch-library*` routes exactly. */
+ * `/api/patch-library*` routes exactly. Registered twice (once per
+ * [AppConfig.PatchSchema]) with distinct [basePath]s so the "Patching" and
+ * "Patched TV" tabs get fully independent libraries. */
 fun Route.patchLibraryRoutes(
     appConfig: AppConfig,
     patchLibrary: PatchLibrary,
     patchesDir: File,
+    schema: AppConfig.PatchSchema,
+    basePath: String = "/api/patch-library",
 ) {
-    get("/api/patch-library") {
-        call.respond(LibraryResponse(appConfig.listPatchLibrary()))
+    get(basePath) {
+        call.respond(LibraryResponse(appConfig.listPatchLibrary(schema)))
     }
 
-    post("/api/patch-library") {
+    post(basePath) {
         val payload = call.receive<AppConfig.PatchLibraryPayload>()
         if (!appConfig.isValidSlug(payload.id)) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("A valid id (letters, numbers, - and _ only) is required"))
@@ -57,7 +61,7 @@ fun Route.patchLibraryRoutes(
             return@post
         }
 
-        val result = appConfig.addPatchToLibrary(payload.id, payload.name, storedName)
+        val result = appConfig.addPatchToLibrary(schema, payload.id, payload.name, storedName)
         when (result) {
             is AppConfig.Result.Error -> call.respond(HttpStatusCode.BadRequest, ErrorResponse(result.message))
             is AppConfig.Result.Ok -> {
@@ -68,7 +72,7 @@ fun Route.patchLibraryRoutes(
         }
     }
 
-    put("/api/patch-library/{id}") {
+    put("$basePath/{id}") {
         val id = call.parameters["id"]
         if (id == null) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid patch id"))
@@ -86,12 +90,12 @@ fun Route.patchLibraryRoutes(
             }
         }
 
-        val existing = appConfig.listPatchLibrary().firstOrNull { it.id == id }
+        val existing = appConfig.listPatchLibrary(schema).firstOrNull { it.id == id }
         val newFileName = if (bytesToWrite != null) (existing?.file?.ifBlank { "$id.mpp" } ?: "$id.mpp") else null
-        val updateResult = appConfig.updatePatchInLibrary(id, payload.name, payload.version, newFileName)
+        val updateResult = appConfig.updatePatchInLibrary(schema, id, payload.name, payload.version, newFileName)
         if (updateResult is AppConfig.Result.Ok && updateResult.value.contentUpdated) {
-            appConfig.resetPatchCustomizations(id)
-            appConfig.invalidatePatchCache(id)
+            appConfig.resetPatchCustomizations(schema, id)
+            appConfig.invalidatePatchCache(schema, id)
         }
 
         when (updateResult) {
@@ -106,31 +110,31 @@ fun Route.patchLibraryRoutes(
         }
     }
 
-    delete("/api/patch-library/{id}") {
+    delete("$basePath/{id}") {
         val id = call.parameters["id"]
         if (id == null) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid patch id"))
             return@delete
         }
 
-        val result = appConfig.deletePatchFromLibrary(id)
+        val result = appConfig.deletePatchFromLibrary(schema, id)
         when (result) {
             is AppConfig.Result.Error -> call.respond(HttpStatusCode.BadRequest, ErrorResponse(result.message))
             is AppConfig.Result.Ok -> {
                 result.value.storedFile?.let { File(patchesDir, it).delete() }
-                appConfig.invalidatePatchCache(id)
+                appConfig.invalidatePatchCache(schema, id)
                 call.respond(DeletedResponse(deleted = mapOf("id" to id)))
             }
         }
     }
 
-    get("/api/patch-library/{id}/inspect") {
+    get("$basePath/{id}/inspect") {
         val id = call.parameters["id"]
         if (id == null) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid patch id"))
             return@get
         }
-        val entry = appConfig.listPatchLibrary().firstOrNull { it.id == id }
+        val entry = appConfig.listPatchLibrary(schema).firstOrNull { it.id == id }
         if (entry == null) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Patch not found"))
             return@get
