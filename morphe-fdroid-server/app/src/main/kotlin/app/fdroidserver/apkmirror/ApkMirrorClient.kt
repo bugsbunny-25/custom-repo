@@ -125,10 +125,28 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
      * entry pins. The feed only exposes the newest ~10 releases - APKMirror
      * has no pagination for it, unlike the HTML listing this replaced - so
      * there's no way to look further back for an older pinned version.
+     *
+     * Before fetching the feed, visits [appUrl] itself first - hitting
+     * `/feed/` stone cold, with no prior page visit and no Referer, looks
+     * more like a scraper to Cloudflare's bot-scoring than a client that
+     * browsed there normally (this is likely why the Uber Eats feed
+     * intermittently challenged us while preparing the test fixtures for
+     * `ApkMirrorClientTest`, while the Disney+ ones didn't). The warm-up
+     * request goes through the same shared [httpClient]/[cookieManager] as
+     * every other request here - including [downloadApk] - so any cookies
+     * APKMirror hands out on the app page carry over to the feed request,
+     * which also sends [appUrl] as its Referer. If the warm-up itself gets
+     * stuck behind a challenge [get] can't clear, we don't let that sink the
+     * whole call - fall through and try the feed directly, since it may not
+     * need the same cookies/referer to go through.
      */
     fun getVersions(appUrl: String): List<VersionEntry> {
+        runCatching { get(appUrl) }.onFailure {
+            logger.debug("apkmirror: warm-up request to $appUrl failed, fetching feed directly instead: $it")
+        }
+
         val url = appUrl.trimEnd('/') + "/feed/"
-        val versions = parseFeedVersions(get(url))
+        val versions = parseFeedVersions(get(url, referer = appUrl))
         logger.info("apkmirror: found ${versions.size} version(s) on $url")
         logger.debug("apkmirror: versions on $url: ${versions.joinToString { it.version }}")
         return versions

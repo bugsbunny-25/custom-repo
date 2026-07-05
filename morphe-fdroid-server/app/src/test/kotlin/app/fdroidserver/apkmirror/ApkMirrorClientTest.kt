@@ -161,12 +161,28 @@ class ApkMirrorClientTest {
 
     private val disneyFeedXml = readFeedFixture("disney-plus-feed.xml")
 
-    private fun startFeedServer(vararg responses: FakeResponse): HttpServer {
+    private val trivialWarmUpResponse = listOf(FakeResponse(200, "<html>app page</html>"))
+
+    /**
+     * [getVersions] now issues two requests - a warm-up GET of the app page,
+     * then the feed itself with the app page as Referer (see [ApkMirrorClient.getVersions]) -
+     * so the fake server dispatches by path: anything ending in `/feed/` draws
+     * from [feed], everything else (the warm-up) from [warmUp]. Keeping the
+     * two response queues separate, rather than one shared list indexed by
+     * request count, is what lets these tests target the feed-retry behavior
+     * specifically without the warm-up request's own retries (it goes through
+     * the same challenge-handling [ApkMirrorClient.get]) consuming responses
+     * meant for the feed.
+     */
+    private fun startFeedServer(feed: List<FakeResponse>, warmUp: List<FakeResponse> = trivialWarmUpResponse): HttpServer {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        val requestCount = AtomicInteger(0)
+        val warmUpCount = AtomicInteger(0)
+        val feedCount = AtomicInteger(0)
         server.createContext("/") { exchange ->
-            val index = requestCount.getAndIncrement().coerceAtMost(responses.size - 1)
-            val response = responses[index]
+            val isFeed = exchange.requestURI.path.endsWith("/feed/")
+            val counter = if (isFeed) feedCount else warmUpCount
+            val responses = if (isFeed) feed else warmUp
+            val response = responses[counter.getAndIncrement().coerceAtMost(responses.size - 1)]
             response.headers.forEach { (name, value) -> exchange.responseHeaders.add(name, value) }
             val bytes = response.body.toByteArray()
             exchange.sendResponseHeaders(response.status, bytes.size.toLong())
@@ -186,10 +202,7 @@ class ApkMirrorClientTest {
 
     @Test
     fun `retries past a transient Cloudflare challenge and returns the real versions`() {
-        val server = startFeedServer(
-            FakeResponse(200, cloudflareChallengeBody),
-            FakeResponse(200, disneyFeedXml),
-        )
+        val server = startFeedServer(feed = listOf(FakeResponse(200, cloudflareChallengeBody), FakeResponse(200, disneyFeedXml)))
         try {
             val client = ApkMirrorClient()
             val versions = client.getVersions("http://127.0.0.1:${server.address.port}/apk/disney/disney")
@@ -201,7 +214,7 @@ class ApkMirrorClientTest {
 
     @Test
     fun `gives up after repeated Cloudflare challenges with a clear error`() {
-        val server = startFeedServer(FakeResponse(200, cloudflareChallengeBody))
+        val server = startFeedServer(feed = listOf(FakeResponse(200, cloudflareChallengeBody)))
         try {
             val client = ApkMirrorClient()
             val exception = assertThrows(IllegalStateException::class.java) {
@@ -216,13 +229,80 @@ class ApkMirrorClientTest {
     @Test
     fun `treats a cf-mitigated challenge header as a challenge even with an ordinary body`() {
         val server = startFeedServer(
-            FakeResponse(200, "not actually a challenge page", mapOf("cf-mitigated" to "challenge")),
-            FakeResponse(200, disneyFeedXml),
+            feed = listOf(
+                FakeResponse(200, "not actually a challenge page", mapOf("cf-mitigated" to "challenge")),
+                FakeResponse(200, disneyFeedXml),
+            ),
         )
         try {
             val client = ApkMirrorClient()
             val versions = client.getVersions("http://127.0.0.1:${server.address.port}/apk/disney/disney")
             assertEquals("26.11.0+rc3-2026.06.24", versions.first().version)
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `warm-up request still lets the feed through when the feed alone is unrecoverably challenged`() {
+        // A persistent challenge on the feed itself shouldn't be masked by (or
+        // blamed on) a warm-up that succeeded just fine.
+        val server = startFeedServer(
+            warmUp = listOf(FakeResponse(200, "<html>app page</html>")),
+            feed = listOf(FakeResponse(200, cloudflareChallengeBody)),
+        )
+        try {
+            val client = ApkMirrorClient()
+            val exception = assertThrows(IllegalStateException::class.java) {
+                client.getVersions("http://127.0.0.1:${server.address.port}/apk/disney/disney")
+            }
+            assertTrue(exception.message.orEmpty().contains("Cloudflare challenge"))
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `falls through to a direct feed fetch when the warm-up itself is unrecoverably challenged`() {
+        val server = startFeedServer(
+            warmUp = listOf(FakeResponse(200, cloudflareChallengeBody)),
+            feed = listOf(FakeResponse(200, disneyFeedXml)),
+        )
+        try {
+            val client = ApkMirrorClient()
+            val versions = client.getVersions("http://127.0.0.1:${server.address.port}/apk/disney/disney")
+            assertEquals("26.11.0+rc3-2026.06.24", versions.first().version)
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `warms up with the app page first, sends it as the feed's Referer, and carries over its cookies`() {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        var feedReferer: String? = null
+        var feedCookie: String? = null
+        server.createContext("/") { exchange ->
+            val bytes: ByteArray
+            if (exchange.requestURI.path.endsWith("/feed/")) {
+                feedReferer = exchange.requestHeaders.getFirst("Referer")
+                feedCookie = exchange.requestHeaders.getFirst("Cookie")
+                bytes = disneyFeedXml.toByteArray()
+            } else {
+                exchange.responseHeaders.add("Set-Cookie", "cf_clearance=warm-token; Path=/")
+                bytes = "<html>app page</html>".toByteArray()
+            }
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        try {
+            val appUrl = "http://127.0.0.1:${server.address.port}/apk/disney/disney"
+            val versions = ApkMirrorClient().getVersions(appUrl)
+
+            assertEquals("26.11.0+rc3-2026.06.24", versions.first().version)
+            assertEquals(appUrl, feedReferer)
+            assertTrue(feedCookie.orEmpty().contains("cf_clearance=warm-token"))
         } finally {
             server.stop(0)
         }
