@@ -1,0 +1,1382 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Repo Config</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --text: #1c2430;
+      --muted: #6b7380;
+      --line: #dde3ea;
+      --brand: #0f766e;
+      --brand-hover: #115e59;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      background: radial-gradient(circle at top left, #ecfeff 0%, var(--bg) 45%);
+      color: var(--text);
+    }
+    .wrap { max-width: 1100px; margin: 32px auto; padding: 0 16px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .sub { margin: 0 0 20px; color: var(--muted); }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td {
+      text-align: left;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+      vertical-align: top;
+    }
+    th { background: #f9fbfd; color: #4b5563; font-weight: 600; }
+    tr:last-child td { border-bottom: none; }
+    .btn {
+      border: 1px solid var(--brand);
+      background: var(--brand);
+      color: #fff;
+      border-radius: 8px;
+      font-size: 13px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    .btn:hover { background: var(--brand-hover); }
+    .btn.small { padding: 5px 8px; font-size: 12px; }
+    .btn.ghost { background: #fff; color: #334155; border-color: #cbd5e1; }
+    .pill {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid #cfd6dd;
+      background: #f8fafc;
+      font-size: 12px;
+    }
+    .entry-list { display: flex; flex-direction: column; gap: 8px; min-width: 300px; }
+    .checked-wrap details { border: 1px solid #dbe2e8; border-radius: 8px; padding: 6px 8px; background: #fbfcfd; }
+    .checked-wrap summary { cursor: pointer; font-size: 12px; color: #334155; font-weight: 600; }
+    .entry {
+      border: 1px solid #dbe2e8;
+      border-radius: 8px;
+      padding: 8px;
+      background: #fbfcfd;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .entry-main { font-size: 12px; color: #334155; }
+    .entry-meta { color: #64748b; }
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.35);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .overlay.open { display: flex; }
+    .modal {
+      width: 100%;
+      max-width: 560px;
+      max-height: 80vh;
+      overflow-y: auto;
+      background: #fff;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      padding: 16px;
+    }
+    .modal h2 { margin: 0 0 14px; font-size: 20px; }
+    .field { margin-bottom: 10px; }
+    label { display: block; font-size: 13px; margin-bottom: 5px; color: #374151; }
+    input[type="text"], input[type="number"] {
+      width: 100%;
+      border: 1px solid #cfd6dd;
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-size: 14px;
+    }
+    .row { display: flex; gap: 12px; }
+    .row .field { flex: 1; }
+    .check { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+    .actions { margin-top: 14px; display: flex; gap: 8px; justify-content: flex-end; }
+    .msg { margin-top: 10px; font-size: 13px; color: #dc2626; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
+    .tab-btn {
+      border: none;
+      background: none;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--muted);
+      padding: 10px 16px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+    }
+    .tab-btn.active { color: var(--brand); border-bottom-color: var(--brand); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .files-list { display: flex; flex-direction: column; gap: 6px; min-width: 260px; }
+    .file-row {
+      border: 1px solid #dbe2e8;
+      border-radius: 8px;
+      padding: 6px 8px;
+      background: #fbfcfd;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .add-file-form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+    .add-file-form input[type="text"] { width: auto; flex: 1; min-width: 100px; }
+    .setup-wrap { max-width: 480px; margin: 64px auto; padding: 0 16px; }
+    .readonly-field {
+      border: 1px solid #e5e9ee;
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-size: 14px;
+      background: #f3f5f7;
+      color: #6b7380;
+    }
+    .hint { font-size: 12px; color: var(--muted); margin: -3px 0 0; }
+    .settings-section { margin-bottom: 22px; }
+    .settings-section h3 { margin: 0 0 10px; font-size: 15px; }
+    @media (max-width: 900px) {
+      table, thead, tbody, tr, th, td { display: block; }
+      thead { display: none; }
+      tr { border-bottom: 1px solid var(--line); }
+      td { border: none; padding: 8px 14px; }
+      .entry-list { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div id="setupScreen" class="setup-wrap" style="display: none;">
+    <h1>Set up your F-Droid repo</h1>
+    <p class="sub">This runs once. These values identify your repo to F-Droid clients - the URL can't be changed afterward without breaking existing subscribers, so double check it.</p>
+    <div class="card" style="padding: 16px;">
+      <form id="setupForm">
+        <div class="field">
+          <label for="setupRepoName">Repo name</label>
+          <input id="setupRepoName" type="text" required />
+        </div>
+        <div class="field">
+          <label for="setupRepoDescription">Repo description</label>
+          <input id="setupRepoDescription" type="text" required />
+        </div>
+        <div class="field">
+          <label for="setupRepoUrl">Repo base URL</label>
+          <input id="setupRepoUrl" type="text" required placeholder="https://fdroid.yourdomain.com" />
+          <p class="hint">Just the domain (no path) - <code>/repo</code> and <code>/patched/repo</code> are appended automatically for the main and patched repos. Locked once setup is complete.</p>
+        </div>
+        <div class="field">
+          <label for="setupRepoIcon">Repo icon filename (optional)</label>
+          <input id="setupRepoIcon" type="text" placeholder="icon.png" />
+        </div>
+        <div class="actions">
+          <button type="submit" class="btn">Initialize</button>
+        </div>
+        <div id="setupMsg" class="msg"></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="mainScreen" class="wrap" style="display: none;">
+    <div class="tabs">
+      <button class="tab-btn active" id="githubTabBtn" data-tab="githubPanel">GitHub</button>
+      <button class="tab-btn" id="patchingTabBtn" data-tab="patchingPanel">Patching</button>
+      <button class="tab-btn" id="settingsTabBtn" data-tab="settingsPanel">Settings</button>
+    </div>
+
+    <div id="githubPanel" class="tab-panel active">
+      <h1>Checked Repositories</h1>
+      <p class="sub">Edit per-repo settings, view checked updates, and delete entries to mark them as not checked.</p>
+      <div style="margin: 0 0 12px;">
+        <button id="newRepoBtn" class="btn">New Repo</button>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Repository</th>
+              <th>Pre-releases</th>
+              <th>Drafts</th>
+              <th>Max releases</th>
+              <th>Checked updates</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="repoRows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="patchingPanel" class="tab-panel">
+      <h1>Patch Library</h1>
+      <p class="sub">Upload Morphe (.mpp) patch files here once, then attach them to any number of apps below. Re-uploading a patch's content here updates it for every app using it (their cached versions are re-checked).</p>
+      <div style="margin: 0 0 12px;">
+        <button id="newLibraryPatchBtn" class="btn">Upload Patch</button>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>File</th>
+              <th>Version</th>
+              <th>Updated</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="libraryRows"></tbody>
+        </table>
+      </div>
+
+      <h1 style="margin-top: 32px;">Patched Apps</h1>
+      <p class="sub">Watch an APKMirror app page for new versions and publish patched builds to the /patched-repo F-Droid repo. Only the newest 3 versions per (app, patch) are kept.</p>
+      <div style="margin: 0 0 12px; display: flex; gap: 8px;">
+        <button id="newPatchBtn" class="btn">New Patch Target</button>
+        <button id="patchAllBtn" class="btn ghost">Patch All</button>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>App</th>
+              <th>APKMirror</th>
+              <th>Attached patches</th>
+              <th>Patched versions</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="patchRows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="settingsPanel" class="tab-panel">
+      <h1>Settings</h1>
+      <p class="sub">Every setting the app uses, in one place. Fields marked read-only were fixed during first-run setup.</p>
+      <div class="card" style="padding: 16px;">
+        <form id="settingsForm">
+          <div class="settings-section">
+            <h3>Repo identity</h3>
+            <div class="field">
+              <label for="settingsRepoName">Repo name</label>
+              <input id="settingsRepoName" type="text" />
+            </div>
+            <div class="field">
+              <label for="settingsRepoDescription">Repo description</label>
+              <input id="settingsRepoDescription" type="text" />
+            </div>
+            <div class="field">
+              <label for="settingsRepoIcon">Repo icon filename</label>
+              <input id="settingsRepoIcon" type="text" />
+            </div>
+            <div class="field">
+              <label>Main repo URL</label>
+              <div id="settingsRepoUrl" class="readonly-field"></div>
+            </div>
+            <div class="field">
+              <label>Patched repo URL</label>
+              <div id="settingsPatchedRepoUrl" class="readonly-field"></div>
+              <p class="hint">Locked after setup - changing this would break existing F-Droid client subscriptions.</p>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>GitHub releases</h3>
+            <div class="field">
+              <label for="settingsGithubToken">GitHub token (optional)</label>
+              <input id="settingsGithubToken" type="text" placeholder="Without a token: 60 requests/hour" />
+            </div>
+            <div class="row">
+              <div class="field">
+                <label for="settingsUpdateInterval">Update interval (seconds)</label>
+                <input id="settingsUpdateInterval" type="number" min="60" />
+              </div>
+              <div class="field">
+                <label for="settingsPatchCheckInterval">Patch check interval (seconds, optional)</label>
+                <input id="settingsPatchCheckInterval" type="number" min="60" placeholder="Defaults to update interval" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label for="settingsApkPattern">Default APK regex</label>
+                <input id="settingsApkPattern" type="text" />
+              </div>
+              <div class="field">
+                <label for="settingsMaxVersionsPerApp">Max versions per app (0 = keep all)</label>
+                <input id="settingsMaxVersionsPerApp" type="number" min="0" />
+              </div>
+            </div>
+            <div class="field">
+              <label for="settingsLogLevel">Log level</label>
+              <input id="settingsLogLevel" type="text" placeholder="DEBUG, INFO, WARNING, ERROR" />
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>Defaults for new GitHub repos</h3>
+            <label class="check"><input id="settingsDefaultIncludePrereleases" type="checkbox" /> Include pre-releases</label>
+            <label class="check"><input id="settingsDefaultIncludeDrafts" type="checkbox" /> Include drafts</label>
+            <label class="check"><input id="settingsDefaultEnabled" type="checkbox" /> Enabled</label>
+            <div class="field" style="margin-top: 10px;">
+              <label for="settingsDefaultMaxReleases">Default max releases</label>
+              <input id="settingsDefaultMaxReleases" type="number" min="0" />
+            </div>
+          </div>
+
+          <div class="actions">
+            <button type="submit" class="btn">Save Settings</button>
+          </div>
+          <div id="settingsMsg" class="msg"></div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="overlay" class="overlay">
+    <div class="modal">
+      <h2>Edit Repository</h2>
+      <form id="repoForm">
+        <input type="hidden" id="repoId" />
+        <div class="field">
+          <label for="repo">Repository (owner/name)</label>
+          <input id="repo" type="text" required />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="max_releases">Max releases</label>
+            <input id="max_releases" type="number" min="0" required />
+          </div>
+          <div class="field">
+            <label for="apk_pattern">APK regex</label>
+            <input id="apk_pattern" type="text" required />
+          </div>
+        </div>
+        <label class="check"><input id="include_prereleases" type="checkbox" /> Include pre-releases</label>
+        <label class="check"><input id="include_drafts" type="checkbox" /> Include drafts</label>
+        <label class="check"><input id="enabled" type="checkbox" /> Enabled</label>
+        <div class="actions">
+          <button type="button" class="btn ghost" id="cancelBtn">Cancel</button>
+          <button type="submit" class="btn">Save</button>
+        </div>
+        <div id="msg" class="msg"></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="patchOverlay" class="overlay">
+    <div class="modal">
+      <h2 id="patchModalTitle">Edit Patch Target</h2>
+      <form id="patchForm">
+        <input type="hidden" id="patchOriginalId" />
+        <div class="row">
+          <div class="field">
+            <label for="patchId">ID (slug)</label>
+            <input id="patchId" type="text" required pattern="[a-zA-Z0-9_-]+" />
+          </div>
+          <div class="field">
+            <label for="patchName">Display name</label>
+            <input id="patchName" type="text" required />
+          </div>
+        </div>
+        <div class="field">
+          <label for="patchApkmirrorUrl">APKMirror app URL</label>
+          <input id="patchApkmirrorUrl" type="text" required />
+        </div>
+        <div class="field">
+          <label for="patchPackageName">Package name (optional, verified against downloaded APK)</label>
+          <input id="patchPackageName" type="text" />
+        </div>
+        <label class="check"><input id="patchEnabled" type="checkbox" /> Enabled</label>
+        <div class="actions">
+          <button type="button" class="btn ghost" id="patchCancelBtn">Cancel</button>
+          <button type="submit" class="btn">Save</button>
+        </div>
+        <div id="patchMsg" class="msg"></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="libraryOverlay" class="overlay">
+    <div class="modal">
+      <h2 id="libraryModalTitle">Upload Patch</h2>
+      <form id="libraryForm">
+        <input type="hidden" id="libraryOriginalId" />
+        <div class="row">
+          <div class="field">
+            <label for="libraryId">ID (slug)</label>
+            <input id="libraryId" type="text" required pattern="[a-zA-Z0-9_-]+" />
+          </div>
+          <div class="field">
+            <label for="libraryName">Display name</label>
+            <input id="libraryName" type="text" required />
+          </div>
+        </div>
+        <div class="field">
+          <label for="libraryFile">.mpp file <span id="libraryFileHint"></span></label>
+          <input id="libraryFile" type="file" accept=".mpp" />
+        </div>
+        <div class="field">
+          <label for="libraryVersion">Version label (optional, e.g. matches the app version it targets)</label>
+          <input id="libraryVersion" type="text" />
+        </div>
+        <div class="actions">
+          <button type="button" class="btn ghost" id="libraryCancelBtn">Cancel</button>
+          <button type="submit" class="btn">Save</button>
+        </div>
+        <div id="libraryMsg" class="msg"></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="attachOverlay" class="overlay">
+    <div class="modal">
+      <h2>Manage Attached Patches</h2>
+      <div id="attachList" class="files-list"></div>
+      <form id="attachForm" class="add-file-form">
+        <input type="hidden" id="attachTargetId" />
+        <select id="attachPatchId" required></select>
+        <input id="attachSupportedVersions" type="text" placeholder="e.g. 1.2.3, 1.2.4 or * (leave empty to use the .mpp file's own versions)" />
+        <input id="attachPatchArgs" type="text" placeholder="extra morphe args (optional)" />
+        <button type="submit" class="btn small">Attach</button>
+      </form>
+      <div class="actions">
+        <button type="button" class="btn ghost" id="attachCloseBtn">Close</button>
+      </div>
+      <div id="attachMsg" class="msg"></div>
+    </div>
+  </div>
+
+  <div id="inspectOverlay" class="overlay">
+    <div class="modal">
+      <h2 id="inspectModalTitle">Patch Contents</h2>
+      <div id="inspectBody" class="files-list"></div>
+      <div class="actions">
+        <button type="button" class="btn ghost" id="inspectCloseBtn">Close</button>
+      </div>
+      <div id="inspectMsg" class="msg"></div>
+    </div>
+  </div>
+
+  <div id="configureOverlay" class="overlay">
+    <div class="modal" style="max-width: 640px;">
+      <h2 id="configureModalTitle">Configure Patches</h2>
+      <p class="sub" style="margin-top: -8px;">Toggle individual sub-patches on/off and override their option values. Left at defaults, an updated .mpp's own values are used; anything changed here is saved as an explicit override and is reset back to defaults when this patch's file is next updated.</p>
+      <div id="configureBody" class="files-list"></div>
+      <div class="actions">
+        <button type="button" class="btn ghost" id="configureCancelBtn">Cancel</button>
+        <button type="button" class="btn" id="configureSaveBtn">Save</button>
+      </div>
+      <div id="configureMsg" class="msg"></div>
+    </div>
+  </div>
+
+  <script>
+    const rows = document.getElementById('repoRows');
+    const overlay = document.getElementById('overlay');
+    const form = document.getElementById('repoForm');
+    const msg = document.getElementById('msg');
+    let formMode = 'edit';
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    async function loadRepos() {
+      const res = await fetch('/api/repos');
+      const data = await res.json();
+      rows.innerHTML = '';
+
+      if (!data.repos.length) {
+        rows.innerHTML = '<tr><td colspan="6">No enabled repositories found.</td></tr>';
+        return;
+      }
+
+      for (const repo of data.repos) {
+        const entriesHtml = repo.checked_entries.length
+          ? `<div class="checked-wrap"><details><summary>${repo.checked_entries.length} checked release(s)</summary><div class="entry-list">${repo.checked_entries.map((entry) => `
+              <div class="entry">
+                <div class="entry-main">
+                  <strong>${escapeHtml(entry.tag || entry.release_id)}</strong>
+                  <span class="entry-meta"> (${escapeHtml(entry.type || 'stable')}) • Build ${escapeHtml(entry.build_number)} • APKs ${entry.apks_downloaded}/${entry.apks_found}</span>
+                </div>
+                <button class="btn ghost small" data-delete-id="${repo.id}" data-release-id="${encodeURIComponent(entry.build_number)}">Delete</button>
+              </div>
+            `).join('')}</div></details></div>`
+          : '<span class="pill">None</span>';
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><strong>${escapeHtml(repo.repo)}</strong></td>
+          <td><span class="pill">${repo.include_prereleases ? 'Yes' : 'No'}</span></td>
+          <td><span class="pill">${repo.include_drafts ? 'Yes' : 'No'}</span></td>
+          <td>${repo.max_releases}</td>
+          <td>${entriesHtml}</td>
+          <td><button class="btn" data-id="${repo.id}">Edit</button></td>
+        `;
+        tr.querySelector('button[data-id]').addEventListener('click', () => openEditor(repo));
+        tr.querySelectorAll('[data-delete-id]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const repoId = btn.getAttribute('data-delete-id');
+            const releaseId = btn.getAttribute('data-release-id');
+            const delRes = await fetch(`/api/repos/${repoId}/checked/${releaseId}`, { method: 'DELETE' });
+            if (delRes.ok) {
+              await loadRepos();
+            }
+          });
+        });
+        rows.appendChild(tr);
+      }
+    }
+
+    function openEditor(repo) {
+      formMode = 'edit';
+      msg.textContent = '';
+      document.querySelector('.modal h2').textContent = 'Edit Repository';
+      document.getElementById('repoId').value = repo.id;
+      document.getElementById('repo').value = repo.repo;
+      document.getElementById('max_releases').value = repo.max_releases;
+      document.getElementById('apk_pattern').value = repo.apk_pattern;
+      document.getElementById('include_prereleases').checked = repo.include_prereleases;
+      document.getElementById('include_drafts').checked = repo.include_drafts;
+      document.getElementById('enabled').checked = repo.enabled;
+      overlay.classList.add('open');
+    }
+
+    function openNewRepo() {
+      formMode = 'new';
+      msg.textContent = '';
+      document.querySelector('.modal h2').textContent = 'Add Repository';
+      document.getElementById('repoId').value = '';
+      document.getElementById('repo').value = '';
+      document.getElementById('max_releases').value = 5;
+      document.getElementById('apk_pattern').value = '.*\\\\.apk$';
+      document.getElementById('include_prereleases').checked = true;
+      document.getElementById('include_drafts').checked = false;
+      document.getElementById('enabled').checked = true;
+      overlay.classList.add('open');
+    }
+
+    function closeEditor() {
+      overlay.classList.remove('open');
+    }
+
+    document.getElementById('newRepoBtn').addEventListener('click', openNewRepo);
+    document.getElementById('cancelBtn').addEventListener('click', closeEditor);
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeEditor();
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      msg.textContent = '';
+      const repoId = document.getElementById('repoId').value;
+      const payload = {
+        repo: document.getElementById('repo').value.trim(),
+        max_releases: Number(document.getElementById('max_releases').value),
+        apk_pattern: document.getElementById('apk_pattern').value,
+        include_prereleases: document.getElementById('include_prereleases').checked,
+        include_drafts: document.getElementById('include_drafts').checked,
+        enabled: document.getElementById('enabled').checked,
+      };
+
+      let res;
+      if (formMode === 'new') {
+        res = await fetch('/api/repos', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+      } else {
+        res = await fetch(`/api/repos/${repoId}`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+      }
+
+      const result = await res.json();
+      if (!res.ok) {
+        msg.textContent = result.error || 'Failed to save';
+        return;
+      }
+
+      closeEditor();
+      await loadRepos();
+    });
+
+    // ---- Tabs ----
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+        document.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById(btn.getAttribute('data-tab')).classList.add('active');
+      });
+    });
+
+    // ---- Patch Library ----
+    const libraryRows = document.getElementById('libraryRows');
+    const libraryOverlay = document.getElementById('libraryOverlay');
+    const libraryForm = document.getElementById('libraryForm');
+    const libraryMsg = document.getElementById('libraryMsg');
+    let libraryFormMode = 'new';
+    let libraryById = {};
+
+    async function readFileAsBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function loadLibrary() {
+      const res = await fetch('/api/patch-library');
+      const data = await res.json();
+      libraryRows.innerHTML = '';
+      libraryById = {};
+
+      if (!data.library.length) {
+        libraryRows.innerHTML = '<tr><td colspan="6">No patches uploaded yet.</td></tr>';
+      } else {
+        for (const patch of data.library) {
+          libraryById[patch.id] = patch;
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${escapeHtml(patch.id)}</td>
+            <td><strong>${escapeHtml(patch.name)}</strong></td>
+            <td>${escapeHtml(patch.file)}</td>
+            <td>${escapeHtml(patch.version || '')}</td>
+            <td><span class="entry-meta">${escapeHtml(patch.updated_at || '')}</span></td>
+            <td>
+              <button class="btn small" data-update-patch="${patch.id}">Update</button>
+              <button class="btn ghost small" data-inspect-patch="${patch.id}">View Packages</button>
+              <button class="btn ghost small" data-delete-patch="${patch.id}">Delete</button>
+            </td>
+          `;
+          tr.querySelector('[data-update-patch]').addEventListener('click', () => openLibraryEditor(patch));
+          tr.querySelector('[data-inspect-patch]').addEventListener('click', () => openInspect(patch.id, patch.name));
+          tr.querySelector('[data-delete-patch]').addEventListener('click', async () => {
+            if (!confirm(`Delete patch "${patch.name}"? It will be detached from any app using it.`)) return;
+            const delRes = await fetch(`/api/patch-library/${patch.id}`, { method: 'DELETE' });
+            if (delRes.ok) {
+              await loadLibrary();
+              await loadPatchTargets();
+            }
+          });
+          libraryRows.appendChild(tr);
+        }
+      }
+
+      populateAttachPatchOptions();
+    }
+
+    function openNewLibraryPatch() {
+      libraryFormMode = 'new';
+      libraryMsg.textContent = '';
+      document.getElementById('libraryModalTitle').textContent = 'Upload Patch';
+      document.getElementById('libraryOriginalId').value = '';
+      document.getElementById('libraryId').value = '';
+      document.getElementById('libraryId').disabled = false;
+      document.getElementById('libraryName').value = '';
+      document.getElementById('libraryFile').value = '';
+      document.getElementById('libraryFile').required = true;
+      document.getElementById('libraryFileHint').textContent = '';
+      document.getElementById('libraryVersion').value = '';
+      libraryOverlay.classList.add('open');
+    }
+
+    function openLibraryEditor(patch) {
+      libraryFormMode = 'edit';
+      libraryMsg.textContent = '';
+      document.getElementById('libraryModalTitle').textContent = 'Update Patch';
+      document.getElementById('libraryOriginalId').value = patch.id;
+      document.getElementById('libraryId').value = patch.id;
+      document.getElementById('libraryId').disabled = true;
+      document.getElementById('libraryName').value = patch.name;
+      document.getElementById('libraryFile').value = '';
+      document.getElementById('libraryFile').required = false;
+      document.getElementById('libraryFileHint').textContent = '(leave empty to keep the current file)';
+      document.getElementById('libraryVersion').value = patch.version || '';
+      libraryOverlay.classList.add('open');
+    }
+
+    document.getElementById('newLibraryPatchBtn').addEventListener('click', openNewLibraryPatch);
+    document.getElementById('libraryCancelBtn').addEventListener('click', () => {
+      libraryOverlay.classList.remove('open');
+    });
+    libraryOverlay.addEventListener('click', (e) => {
+      if (e.target === libraryOverlay) libraryOverlay.classList.remove('open');
+    });
+
+    libraryForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      libraryMsg.textContent = '';
+      const originalId = document.getElementById('libraryOriginalId').value;
+      const fileInput = document.getElementById('libraryFile');
+      const file = fileInput.files[0];
+
+      if (libraryFormMode === 'new' && !file) {
+        libraryMsg.textContent = 'Choose a .mpp file';
+        return;
+      }
+
+      const payload = {
+        id: document.getElementById('libraryId').value.trim(),
+        name: document.getElementById('libraryName').value.trim(),
+        version: document.getElementById('libraryVersion').value.trim(),
+      };
+      if (file) {
+        payload.filename = file.name;
+        payload.content_base64 = await readFileAsBase64(file);
+      }
+
+      let res;
+      if (libraryFormMode === 'new') {
+        res = await fetch('/api/patch-library', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+      } else {
+        res = await fetch(`/api/patch-library/${originalId}`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+      }
+
+      const result = await res.json();
+      if (!res.ok) {
+        libraryMsg.textContent = result.error || 'Failed to save';
+        return;
+      }
+
+      libraryOverlay.classList.remove('open');
+      await loadLibrary();
+      await loadPatchTargets();
+    });
+
+    // ---- Inspect a library patch's packages/versions ----
+    const inspectOverlay = document.getElementById('inspectOverlay');
+    const inspectBody = document.getElementById('inspectBody');
+    const inspectMsg = document.getElementById('inspectMsg');
+
+    async function openInspect(patchId, patchName) {
+      inspectMsg.textContent = '';
+      document.getElementById('inspectModalTitle').textContent = `Patch Contents — ${patchName}`;
+      inspectBody.innerHTML = '<div class="entry-meta">Reading patch file…</div>';
+      inspectOverlay.classList.add('open');
+
+      let res, data;
+      try {
+        res = await fetch(`/api/patch-library/${patchId}/inspect`);
+        data = await res.json();
+      } catch (e) {
+        inspectBody.innerHTML = '';
+        inspectMsg.textContent = 'Failed to reach the server';
+        return;
+      }
+
+      if (!res.ok) {
+        inspectBody.innerHTML = '';
+        inspectMsg.textContent = data.error || 'Failed to inspect patch';
+        return;
+      }
+
+      if (!data.patches.length) {
+        inspectBody.innerHTML = '<div class="entry-meta">No patches found in this file.</div>';
+        return;
+      }
+
+      // Group by package name: for each package, which sub-patches support
+      // it and with which versions (rather than one block per sub-patch).
+      const UNRESTRICTED = '(any package)';
+      const byPackage = {};
+      for (const p of data.patches) {
+        const entries = p.packages.length ? p.packages : [{ package: UNRESTRICTED, versions: [] }];
+        for (const pkg of entries) {
+          (byPackage[pkg.package] = byPackage[pkg.package] || []).push({
+            name: p.name || '(unnamed patch)',
+            description: p.description,
+            versions: pkg.versions,
+          });
+        }
+      }
+
+      const packageNames = Object.keys(byPackage).sort((a, b) => {
+        if (a === UNRESTRICTED) return 1;
+        if (b === UNRESTRICTED) return -1;
+        return a.localeCompare(b);
+      });
+
+      inspectBody.innerHTML = packageNames.map((pkgName) => `
+        <div class="checked-wrap">
+          <details>
+            <summary>${escapeHtml(pkgName)} <span class="entry-meta">(${byPackage[pkgName].length} patch${byPackage[pkgName].length === 1 ? '' : 'es'})</span></summary>
+            <div class="entry-list" style="margin-top: 8px;">
+              ${byPackage[pkgName].map((entry) => `
+                <div class="file-row">
+                  <div>
+                    <strong>${escapeHtml(entry.name)}</strong>
+                    <span class="entry-meta"> — ${entry.versions.length ? escapeHtml(entry.versions.join(', ')) : 'all versions'}${entry.description ? ' — ' + escapeHtml(entry.description) : ''}</span>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </details>
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('inspectCloseBtn').addEventListener('click', () => {
+      inspectOverlay.classList.remove('open');
+    });
+    inspectOverlay.addEventListener('click', (e) => {
+      if (e.target === inspectOverlay) inspectOverlay.classList.remove('open');
+    });
+
+    // ---- Patch Targets (apps) ----
+    const patchRows = document.getElementById('patchRows');
+    const patchOverlay = document.getElementById('patchOverlay');
+    const patchForm = document.getElementById('patchForm');
+    const patchMsg = document.getElementById('patchMsg');
+    let patchFormMode = 'edit';
+
+    const attachOverlay = document.getElementById('attachOverlay');
+    const attachList = document.getElementById('attachList');
+    const attachForm = document.getElementById('attachForm');
+    const attachMsg = document.getElementById('attachMsg');
+    const attachPatchSelect = document.getElementById('attachPatchId');
+    let targetsById = {};
+
+    function populateAttachPatchOptions() {
+      attachPatchSelect.innerHTML = Object.values(libraryById)
+        .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`)
+        .join('');
+    }
+
+    async function loadPatchTargets() {
+      const res = await fetch('/api/patch-targets');
+      const data = await res.json();
+      patchRows.innerHTML = '';
+      targetsById = {};
+
+      if (!data.targets.length) {
+        patchRows.innerHTML = '<tr><td colspan="5">No patch targets configured.</td></tr>';
+        return;
+      }
+
+      for (const target of data.targets) {
+        targetsById[target.id] = target;
+
+        const attachedHtml = target.patches.length
+          ? target.patches.map((a) => `<span class="pill">${escapeHtml(a.patch_name)} (${(a.supported_versions || []).length ? escapeHtml(a.supported_versions.join(', ')) : 'from .mpp'})</span>`).join(' ')
+          : '<span class="pill">None</span>';
+
+        const versionsHtml = target.checked_entries.length
+          ? `<div class="checked-wrap"><details><summary>${target.checked_entries.length} patched version(s)</summary><div class="entry-list">${target.checked_entries.map((entry) => `
+              <div class="entry">
+                <div class="entry-main">
+                  <strong>${escapeHtml(entry.version)}</strong>
+                  <span class="entry-meta"> • ${escapeHtml(entry.patch_id)} • ${escapeHtml(entry.processed_at || '')}${entry.variant ? ' • ' + escapeHtml([entry.variant.lang, entry.variant.dpi, entry.variant.arch].filter(Boolean).join('/')) : ''}</span>
+                  <div class="entry-meta">${escapeHtml(entry.output || '')}</div>
+                </div>
+                <button class="btn ghost small" data-target-id="${target.id}" data-cache-key="${encodeURIComponent(entry.cache_key)}">Delete</button>
+              </div>
+            `).join('')}</div></details></div>`
+          : '<span class="pill">None</span>';
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><strong>${escapeHtml(target.name)}</strong><br/><span class="entry-meta">${escapeHtml(target.id)}</span></td>
+          <td><a href="${escapeHtml(target.apkmirror_url)}" target="_blank" rel="noopener">${escapeHtml(target.apkmirror_url)}</a></td>
+          <td>${attachedHtml}</td>
+          <td>${versionsHtml}</td>
+          <td>
+            <button class="btn small" data-patch-now="${target.id}">Patch Now</button>
+            <button class="btn small" data-edit-target="${target.id}">Edit</button>
+            <button class="btn ghost small" data-manage-attachments="${target.id}">Patches</button>
+            <button class="btn ghost small" data-delete-target="${target.id}">Delete</button>
+          </td>
+        `;
+        tr.querySelector('[data-patch-now]').addEventListener('click', async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          const originalText = btn.textContent;
+          btn.textContent = 'Patching…';
+          try {
+            const res = await fetch(`/api/patch-targets/${target.id}/run`, { method: 'POST' });
+            const result = await res.json();
+            if (!res.ok) {
+              alert(result.error || 'Failed to patch');
+              return;
+            }
+            await loadPatchTargets();
+          } finally {
+            btn.disabled = false;
+            btn.textContent = originalText;
+          }
+        });
+        tr.querySelector('[data-edit-target]').addEventListener('click', () => openPatchEditor(target));
+        tr.querySelector('[data-manage-attachments]').addEventListener('click', () => openAttachManager(target.id));
+        tr.querySelector('[data-delete-target]').addEventListener('click', async () => {
+          if (!confirm(`Delete patch target "${target.name}"?`)) return;
+          const delRes = await fetch(`/api/patch-targets/${target.id}`, { method: 'DELETE' });
+          if (delRes.ok) await loadPatchTargets();
+        });
+        tr.querySelectorAll('[data-target-id]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const targetId = btn.getAttribute('data-target-id');
+            const cacheKey = btn.getAttribute('data-cache-key');
+            const delRes = await fetch(`/api/patch-targets/${targetId}/checked/${cacheKey}`, { method: 'DELETE' });
+            if (delRes.ok) await loadPatchTargets();
+          });
+        });
+        patchRows.appendChild(tr);
+      }
+    }
+
+    function openPatchEditor(target) {
+      patchFormMode = 'edit';
+      patchMsg.textContent = '';
+      document.getElementById('patchModalTitle').textContent = 'Edit Patch Target';
+      document.getElementById('patchOriginalId').value = target.id;
+      document.getElementById('patchId').value = target.id;
+      document.getElementById('patchId').disabled = true;
+      document.getElementById('patchName').value = target.name;
+      document.getElementById('patchApkmirrorUrl').value = target.apkmirror_url;
+      document.getElementById('patchPackageName').value = target.package_name || '';
+      document.getElementById('patchEnabled').checked = target.enabled;
+      patchOverlay.classList.add('open');
+    }
+
+    function openNewPatch() {
+      patchFormMode = 'new';
+      patchMsg.textContent = '';
+      document.getElementById('patchModalTitle').textContent = 'Add Patch Target';
+      document.getElementById('patchOriginalId').value = '';
+      document.getElementById('patchId').value = '';
+      document.getElementById('patchId').disabled = false;
+      document.getElementById('patchName').value = '';
+      document.getElementById('patchApkmirrorUrl').value = '';
+      document.getElementById('patchPackageName').value = '';
+      document.getElementById('patchEnabled').checked = true;
+      patchOverlay.classList.add('open');
+    }
+
+    function closePatchEditor() {
+      patchOverlay.classList.remove('open');
+    }
+
+    document.getElementById('newPatchBtn').addEventListener('click', openNewPatch);
+    document.getElementById('patchAllBtn').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = 'Patching…';
+      try {
+        const res = await fetch('/api/patch-targets/run-all', { method: 'POST' });
+        const result = await res.json();
+        if (!res.ok) {
+          alert(result.error || 'Failed to patch all');
+          return;
+        }
+        await loadPatchTargets();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
+    document.getElementById('patchCancelBtn').addEventListener('click', closePatchEditor);
+    patchOverlay.addEventListener('click', (e) => {
+      if (e.target === patchOverlay) closePatchEditor();
+    });
+
+    patchForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      patchMsg.textContent = '';
+      const originalId = document.getElementById('patchOriginalId').value;
+      const payload = {
+        id: document.getElementById('patchId').value.trim(),
+        name: document.getElementById('patchName').value.trim(),
+        apkmirror_url: document.getElementById('patchApkmirrorUrl').value.trim(),
+        package_name: document.getElementById('patchPackageName').value.trim(),
+        enabled: document.getElementById('patchEnabled').checked,
+      };
+
+      let res;
+      if (patchFormMode === 'new') {
+        res = await fetch('/api/patch-targets', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+      } else {
+        res = await fetch(`/api/patch-targets/${originalId}`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+      }
+
+      const result = await res.json();
+      if (!res.ok) {
+        patchMsg.textContent = result.error || 'Failed to save';
+        return;
+      }
+
+      closePatchEditor();
+      await loadPatchTargets();
+    });
+
+    // ---- Attach / detach library patches on a target ----
+    function renderAttachList(targetId) {
+      const target = targetsById[targetId];
+      attachList.innerHTML = '';
+      if (!target || !target.patches.length) {
+        attachList.innerHTML = '<div class="entry-meta">No patches attached yet.</div>';
+        return;
+      }
+      for (const attachment of target.patches) {
+        const row = document.createElement('div');
+        row.className = 'file-row';
+        const selectionCount = Object.keys(attachment.patch_selection || {}).length;
+        const overrideCount = Object.keys(attachment.option_overrides || {}).length;
+        const customizedNote = (selectionCount || overrideCount)
+          ? ` — <span class="entry-meta">${selectionCount + overrideCount} custom override(s)</span>`
+          : '';
+        row.innerHTML = `
+          <div>
+            <strong>${escapeHtml(attachment.patch_name)}</strong>
+            <span class="entry-meta"> — versions: ${(attachment.supported_versions || []).length ? escapeHtml(attachment.supported_versions.join(', ')) : 'from .mpp file'}${attachment.patch_args ? ' — args: ' + escapeHtml(attachment.patch_args) : ''}</span>${customizedNote}
+          </div>
+          <div>
+            <button class="btn small" data-configure-patch="${escapeHtml(attachment.patch_id)}">Configure</button>
+            <button class="btn ghost small" data-detach-patch="${escapeHtml(attachment.patch_id)}">Detach</button>
+          </div>
+        `;
+        row.querySelector('[data-configure-patch]').addEventListener('click', () => {
+          openConfigure(targetId, attachment.patch_id, attachment.patch_name);
+        });
+        row.querySelector('[data-detach-patch]').addEventListener('click', async () => {
+          const delRes = await fetch(`/api/patch-targets/${targetId}/attachments/${attachment.patch_id}`, { method: 'DELETE' });
+          if (delRes.ok) {
+            await loadPatchTargets();
+            renderAttachList(targetId);
+          }
+        });
+        attachList.appendChild(row);
+      }
+    }
+
+    function openAttachManager(targetId) {
+      attachMsg.textContent = '';
+      document.getElementById('attachTargetId').value = targetId;
+      populateAttachPatchOptions();
+      renderAttachList(targetId);
+      attachOverlay.classList.add('open');
+    }
+
+    document.getElementById('attachCloseBtn').addEventListener('click', () => {
+      attachOverlay.classList.remove('open');
+    });
+    attachOverlay.addEventListener('click', (e) => {
+      if (e.target === attachOverlay) attachOverlay.classList.remove('open');
+    });
+
+    attachForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      attachMsg.textContent = '';
+      const targetId = document.getElementById('attachTargetId').value;
+
+      if (!attachPatchSelect.value) {
+        attachMsg.textContent = 'Upload a patch to the library first';
+        return;
+      }
+
+      const payload = {
+        patch_id: attachPatchSelect.value,
+        supported_versions: document.getElementById('attachSupportedVersions').value.trim(),
+        patch_args: document.getElementById('attachPatchArgs').value.trim(),
+      };
+
+      const res = await fetch(`/api/patch-targets/${targetId}/attachments`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        attachMsg.textContent = result.error || 'Failed to attach patch';
+        return;
+      }
+
+      attachForm.reset();
+      await loadPatchTargets();
+      renderAttachList(targetId);
+    });
+
+    // ---- Configure a single attachment's sub-patch enable/disable + options ----
+    const configureOverlay = document.getElementById('configureOverlay');
+    const configureBody = document.getElementById('configureBody');
+    const configureMsg = document.getElementById('configureMsg');
+    let configureState = null; // { targetId, patchId, subPatches: [...] }
+
+    function subPatchDefaultEnabled(subPatch) {
+      // Treat a missing/unknown Enabled: line as "enabled" (most patches are).
+      return subPatch.enabled !== false;
+    }
+
+    async function openConfigure(targetId, patchId, patchName) {
+      configureMsg.textContent = '';
+      document.getElementById('configureModalTitle').textContent = `Configure — ${patchName}`;
+      configureBody.innerHTML = '<div class="entry-meta">Reading patch file…</div>';
+      configureOverlay.classList.add('open');
+      configureState = null;
+
+      let res, data;
+      try {
+        res = await fetch(`/api/patch-library/${patchId}/inspect`);
+        data = await res.json();
+      } catch (e) {
+        configureBody.innerHTML = '';
+        configureMsg.textContent = 'Failed to reach the server';
+        return;
+      }
+
+      if (!res.ok) {
+        configureBody.innerHTML = '';
+        configureMsg.textContent = data.error || 'Failed to read patch file';
+        return;
+      }
+
+      if (!data.patches.length) {
+        configureBody.innerHTML = '<div class="entry-meta">No sub-patches found in this file.</div>';
+        return;
+      }
+
+      const target = targetsById[targetId];
+      const attachment = (target ? target.patches : []).find((a) => a.patch_id === patchId) || {};
+      const currentSelection = attachment.patch_selection || {};
+      const currentOverrides = attachment.option_overrides || {};
+
+      // Only show sub-patches applicable to this app: ones with no package
+      // restriction at all, or ones that explicitly list this app's package.
+      const packageName = target ? target.package_name : '';
+      const applicablePatches = packageName
+        ? data.patches.filter((p) => !p.packages.length || p.packages.some((pkg) => pkg.package === packageName))
+        : data.patches;
+
+      if (!applicablePatches.length) {
+        configureBody.innerHTML = `<div class="entry-meta">No sub-patches in this file apply to this app's package${packageName ? ` (${escapeHtml(packageName)})` : ''}.</div>`;
+        return;
+      }
+
+      configureState = { targetId, patchId, subPatches: applicablePatches };
+
+      configureBody.innerHTML = applicablePatches.map((p, idx) => {
+        const defaultEnabled = subPatchDefaultEnabled(p);
+        const effectiveEnabled = Object.prototype.hasOwnProperty.call(currentSelection, p.name)
+          ? currentSelection[p.name] : defaultEnabled;
+        const optionOverridesForPatch = currentOverrides[p.name] || {};
+
+        return `
+          <div class="entry" style="flex-direction: column; align-items: stretch; gap: 8px;">
+            <label class="check">
+              <input type="checkbox" data-subpatch-idx="${idx}" ${effectiveEnabled ? 'checked' : ''} />
+              <strong>${escapeHtml(p.name || '(unnamed)')}</strong>
+              <span class="entry-meta">(default: ${defaultEnabled ? 'enabled' : 'disabled'})</span>
+            </label>
+            ${p.description ? `<div class="entry-meta">${escapeHtml(p.description)}</div>` : ''}
+            ${p.options.length ? `<div class="entry-list">${p.options.map((opt) => `
+              <div class="field" style="margin-bottom: 0;">
+                <label>${escapeHtml(opt.title || opt.key)} <span class="entry-meta">(default: ${escapeHtml(opt.default || '(none)')})</span></label>
+                <input type="text" data-subpatch-option-idx="${idx}" data-option-key="${escapeHtml(opt.key)}"
+                       value="${escapeHtml(optionOverridesForPatch[opt.key] !== undefined ? optionOverridesForPatch[opt.key] : '')}"
+                       placeholder="${escapeHtml(opt.default || '')}" />
+              </div>
+            `).join('')}</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    document.getElementById('configureCancelBtn').addEventListener('click', () => {
+      configureOverlay.classList.remove('open');
+    });
+    configureOverlay.addEventListener('click', (e) => {
+      if (e.target === configureOverlay) configureOverlay.classList.remove('open');
+    });
+
+    document.getElementById('configureSaveBtn').addEventListener('click', async () => {
+      if (!configureState) return;
+      configureMsg.textContent = '';
+      const { targetId, patchId, subPatches } = configureState;
+
+      const patchSelection = {};
+      const optionOverrides = {};
+
+      subPatches.forEach((p, idx) => {
+        const checkbox = configureBody.querySelector(`[data-subpatch-idx="${idx}"]`);
+        const effective = checkbox.checked;
+        if (effective !== subPatchDefaultEnabled(p)) {
+          patchSelection[p.name] = effective;
+        }
+
+        p.options.forEach((opt) => {
+          const input = configureBody.querySelector(
+            `[data-subpatch-option-idx="${idx}"][data-option-key="${CSS.escape(opt.key)}"]`
+          );
+          const value = input ? input.value.trim() : '';
+          if (value !== '' && value !== (opt.default || '')) {
+            optionOverrides[p.name] = optionOverrides[p.name] || {};
+            optionOverrides[p.name][opt.key] = value;
+          }
+        });
+      });
+
+      const res = await fetch(`/api/patch-targets/${targetId}/attachments`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ patch_id: patchId, patch_selection: patchSelection, option_overrides: optionOverrides }),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        configureMsg.textContent = result.error || 'Failed to save';
+        return;
+      }
+
+      configureOverlay.classList.remove('open');
+      await loadPatchTargets();
+      renderAttachList(targetId);
+    });
+
+    // ---- Settings tab ----
+    const settingsForm = document.getElementById('settingsForm');
+    const settingsMsg = document.getElementById('settingsMsg');
+
+    async function loadSettings() {
+      const res = await fetch('/api/settings');
+      const data = await res.json();
+      const s = data.settings;
+      document.getElementById('settingsRepoName').value = s.repo_name || '';
+      document.getElementById('settingsRepoDescription').value = s.repo_description || '';
+      document.getElementById('settingsRepoIcon').value = s.repo_icon || '';
+      const repoBaseUrl = (s.repo_url || '').replace(/\/+$/, '');
+      document.getElementById('settingsRepoUrl').textContent = repoBaseUrl ? repoBaseUrl + '/repo' : '';
+      document.getElementById('settingsPatchedRepoUrl').textContent = repoBaseUrl ? repoBaseUrl + '/patched/repo' : '';
+      document.getElementById('settingsGithubToken').value = s.github_token || '';
+      document.getElementById('settingsUpdateInterval').value = s.update_interval;
+      document.getElementById('settingsPatchCheckInterval').value = s.patch_check_interval ?? '';
+      document.getElementById('settingsApkPattern').value = s.apk_pattern || '';
+      document.getElementById('settingsMaxVersionsPerApp').value = s.max_versions_per_app;
+      document.getElementById('settingsLogLevel').value = s.log_level || '';
+      document.getElementById('settingsDefaultIncludePrereleases').checked = s.default_include_prereleases;
+      document.getElementById('settingsDefaultIncludeDrafts').checked = s.default_include_drafts;
+      document.getElementById('settingsDefaultEnabled').checked = s.default_enabled;
+      document.getElementById('settingsDefaultMaxReleases').value = s.default_max_releases;
+    }
+
+    settingsForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      settingsMsg.textContent = '';
+
+      const patchCheckIntervalRaw = document.getElementById('settingsPatchCheckInterval').value.trim();
+      const payload = {
+        repo_name: document.getElementById('settingsRepoName').value.trim(),
+        repo_description: document.getElementById('settingsRepoDescription').value.trim(),
+        repo_icon: document.getElementById('settingsRepoIcon').value.trim(),
+        github_token: document.getElementById('settingsGithubToken').value.trim(),
+        update_interval: Number(document.getElementById('settingsUpdateInterval').value),
+        patch_check_interval: patchCheckIntervalRaw === '' ? null : Number(patchCheckIntervalRaw),
+        apk_pattern: document.getElementById('settingsApkPattern').value,
+        max_versions_per_app: Number(document.getElementById('settingsMaxVersionsPerApp').value),
+        log_level: document.getElementById('settingsLogLevel').value.trim(),
+        default_include_prereleases: document.getElementById('settingsDefaultIncludePrereleases').checked,
+        default_include_drafts: document.getElementById('settingsDefaultIncludeDrafts').checked,
+        default_enabled: document.getElementById('settingsDefaultEnabled').checked,
+        default_max_releases: Number(document.getElementById('settingsDefaultMaxReleases').value),
+      };
+
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        settingsMsg.textContent = result.error || 'Failed to save settings';
+        return;
+      }
+      settingsMsg.style.color = '#0f766e';
+      settingsMsg.textContent = 'Saved.';
+      await loadSettings();
+      await loadRepos();
+    });
+
+    // ---- First-run setup gate ----
+    const setupScreen = document.getElementById('setupScreen');
+    const mainScreen = document.getElementById('mainScreen');
+    const setupForm = document.getElementById('setupForm');
+    const setupMsg = document.getElementById('setupMsg');
+
+    setupForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      setupMsg.textContent = '';
+      const payload = {
+        repo_name: document.getElementById('setupRepoName').value.trim(),
+        repo_description: document.getElementById('setupRepoDescription').value.trim(),
+        repo_url: document.getElementById('setupRepoUrl').value.trim(),
+        repo_icon: document.getElementById('setupRepoIcon').value.trim(),
+      };
+      const res = await fetch('/api/setup/init', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        setupMsg.textContent = result.error || 'Failed to complete setup';
+        return;
+      }
+      await boot();
+    });
+
+    async function boot() {
+      const res = await fetch('/api/setup/status');
+      const data = await res.json();
+      if (!data.initialized) {
+        setupScreen.style.display = 'block';
+        mainScreen.style.display = 'none';
+        return;
+      }
+      setupScreen.style.display = 'none';
+      mainScreen.style.display = 'block';
+      await Promise.all([loadRepos(), loadLibrary(), loadPatchTargets(), loadSettings()]);
+    }
+
+    boot();
+  </script>
+</body>
+</html>
