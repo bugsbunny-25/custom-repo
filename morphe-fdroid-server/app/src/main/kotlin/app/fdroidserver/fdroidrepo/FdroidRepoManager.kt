@@ -105,9 +105,18 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
                 .directory(workingDir)
                 .redirectErrorStream(true)
                 .start()
+            // Close stdin immediately: `fdroid` can otherwise block waiting on
+            // an interactive prompt (e.g. keystore setup) that will never be
+            // answered in this non-interactive/containerized context.
+            process.outputStream.close()
             val output = process.inputStream.bufferedReader().readText()
-            val exitCode = process.waitFor()
-            exitCode to output
+            val finished = process.waitFor(FDROID_TIMEOUT_MINUTES, java.util.concurrent.TimeUnit.MINUTES)
+            if (!finished) {
+                logger.error("Timed out after $FDROID_TIMEOUT_MINUTES minutes running fdroid ${args.joinToString(" ")} in $workingDir - killing process")
+                process.destroyForcibly()
+                return -1 to "Timed out waiting for fdroid ${args.joinToString(" ")}"
+            }
+            process.exitValue() to output
         } catch (e: Exception) {
             logger.error("Error running fdroid ${args.joinToString(" ")} in $workingDir: $e")
             -1 to (e.message ?: e.toString())
@@ -119,6 +128,12 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
      * [repoDir] (grouped by [groupKey]), deleting the rest. `maxVersions <=
      * 0` disables cleanup entirely (matches the Python version's
      * `max_versions_per_app: 0` = keep-all convention).
+     *
+     * Ranks by the version encoded in the filename (`{targetId}__{patchId}__
+     * {version}.apk`), not file mtime: [PatchScheduler] can end up patching
+     * an older version after the newest one has already been published (see
+     * its own comment on that), which would otherwise have a newer mtime
+     * than the actual latest version and push it out of the keep-window.
      */
     fun pruneOldVersions(repoDir: File, maxVersions: Int, groupKey: (File) -> String) {
         if (maxVersions <= 0) return
@@ -126,7 +141,7 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
         val groups = files.groupBy(groupKey)
 
         for ((key, groupFiles) in groups) {
-            val sorted = groupFiles.sortedByDescending { it.lastModified() }
+            val sorted = groupFiles.sortedWith { a, b -> compareVersions(extractVersion(b), extractVersion(a)) }
             if (sorted.size > maxVersions) {
                 sorted.drop(maxVersions).forEach { old ->
                     logger.info("Removing old APK for $key: ${old.name}")
@@ -136,7 +151,21 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
         }
     }
 
+    private fun extractVersion(file: File): String = file.nameWithoutExtension.substringAfterLast("__")
+
+    private fun compareVersions(a: String, b: String): Int {
+        val partsA = a.split(".").map { it.toIntOrNull() ?: 0 }
+        val partsB = b.split(".").map { it.toIntOrNull() ?: 0 }
+        for (i in 0 until maxOf(partsA.size, partsB.size)) {
+            val cmp = (partsA.getOrElse(i) { 0 }).compareTo(partsB.getOrElse(i) { 0 })
+            if (cmp != 0) return cmp
+        }
+        return 0
+    }
+
     companion object {
+        private const val FDROID_TIMEOUT_MINUTES = 5L
+
         /**
          * Derives each F-Droid repo's `repo_url` from the single base URL
          * collected during setup - F-Droid requires `repo_url` to point

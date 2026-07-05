@@ -36,6 +36,11 @@ class PatchLibrary {
         // rather than just renaming the Kotlin property.
         @SerialName("package") val packageName: String,
         val versions: List<String>, // empty == compatible with any version of this package
+        // Subset of [versions] that morphe-patcher's AppTarget.isExperimental
+        // flags as only experimentally supported. Excluded by default when
+        // deciding what to patch (see PatchScheduler) unless a target opts
+        // in via PatchAttachment.includeExperimentalVersions.
+        val experimentalVersions: List<String> = emptyList(),
     )
 
     @Serializable
@@ -74,10 +79,8 @@ class PatchLibrary {
 
     // Uses morphe-patcher's current (non-deprecated) shape: `Patch.default`,
     // `Patch.compatibility` (a `List<Compatibility>` of per-package targets)
-    // and `Option.name`. Only the flat package name + version list is
-    // surfaced here since that's all the admin UI needs; per-target
-    // metadata (minSdk, isExperimental, etc. from `AppTarget`) is dropped -
-    // revisit if that becomes useful to surface.
+    // and `Option.name`. minSdk and other AppTarget metadata is still
+    // dropped - only isExperimental is surfaced (see PackageInfo).
     private fun Patch<*>.toPatchInfo(): PatchInfo = PatchInfo(
         name = name,
         description = description,
@@ -91,7 +94,10 @@ class PatchLibrary {
             } else {
                 compat.targets.map { it.version!! }
             }
-            PackageInfo(packageName, versions)
+            val experimentalVersions = compat.targets
+                .filter { it.isExperimental && it.version != null }
+                .map { it.version!! }
+            PackageInfo(packageName, versions, experimentalVersions)
         } ?: emptyList(),
         options = options.values.map { option ->
             OptionInfo(

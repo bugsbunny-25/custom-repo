@@ -41,7 +41,7 @@ RUN ./gradlew --no-daemon build -x test
 # ---------------------------------------------------------------------------
 # Stage 2: runtime image
 # ---------------------------------------------------------------------------
-FROM eclipse-temurin:26-jre
+FROM eclipse-temurin:26-jdk
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
@@ -49,7 +49,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     supervisor \
     git \
+    wget \
+    unzip \
+    openjdk-17-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
+
+# Android SDK build-tools: `fdroid update` shells out to `apksigner` to
+# sign/verify modern (v2/v3) APK signature schemes. This was present in the
+# pre-Kotlin-migration Dockerfile (debian:bookworm-slim + sdkmanager) but got
+# dropped when the runtime base moved to eclipse-temurin; restore it here.
+#
+# The `sdkmanager` launcher script only officially supports JDK 17/11, so we
+# install a side JDK 17 (openjdk-17-jdk-headless, above) just to run it
+# during this provisioning step. `java` on PATH stays the base image's JDK
+# 26 - required to run app.jar, which is compiled with jvmTarget=JVM_26 (see
+# morphe-fdroid-server/app/build.gradle.kts) - so this doesn't affect the
+# `java -jar /app/app.jar` command in supervisord.conf.
+ENV ANDROID_HOME=/opt/android-sdk
+ENV PATH=${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/34.0.0
+
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
+    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmd-tools.zip && \
+    unzip -q /tmp/cmd-tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
+    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+    rm /tmp/cmd-tools.zip && \
+    JAVA17_HOME=$(find /usr/lib/jvm -maxdepth 1 -type d -name 'java-17-openjdk*') && \
+    JAVA_HOME=$JAVA17_HOME yes | sdkmanager --licenses && \
+    JAVA_HOME=$JAVA17_HOME sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-34"
 
 # fdroidserver: the only remaining external dependency, see header comment.
 RUN pip3 install --no-cache-dir fdroidserver --break-system-packages

@@ -393,6 +393,12 @@ class AppConfig(private val db: AppDatabase) {
         val patchArgs: String,
         val patchSelection: Map<String, Boolean>,
         val optionOverrides: Map<String, Map<String, String>>,
+        // Whether versions the .mpp file itself marks experimental should be
+        // patched. Excluded by default (see PatchScheduler.checkTarget) -
+        // only relevant when supportedVersions is empty (i.e. falling back
+        // to the .mpp file's own version list rather than an explicit
+        // override).
+        val includeExperimentalVersions: Boolean = false,
     )
 
     @Serializable
@@ -436,6 +442,7 @@ class AppConfig(private val db: AppDatabase) {
                 patchVersion = libRow?.get(PatchLibraryTable.version) ?: "",
                 supportedVersions = toStringList(row[PatchAttachments.supportedVersions]),
                 patchArgs = row[PatchAttachments.patchArgs],
+                includeExperimentalVersions = row[PatchAttachments.includeExperimentalVersions],
                 patchSelection = patchSelection,
                 optionOverrides = optionOverrides,
             )
@@ -521,6 +528,7 @@ class AppConfig(private val db: AppDatabase) {
         val patchArgs: String? = null,
         val patchSelection: Map<String, Boolean>? = null,
         val optionOverrides: Map<String, Map<String, String>>? = null,
+        val includeExperimentalVersions: Boolean? = null,
     )
 
     /**
@@ -556,6 +564,9 @@ class AppConfig(private val db: AppDatabase) {
                 runCatching { json.decodeFromString<Map<String, Map<String, String>>>(it) }.getOrDefault(emptyMap())
             }
             ?: emptyMap()
+        val includeExperimentalVersions = payload.includeExperimentalVersions
+            ?: existing?.get(PatchAttachments.includeExperimentalVersions)
+            ?: false
 
         val supportedVersionsStr = supportedVersions.joinToString(",")
         val patchSelectionStr = json.encodeToString(patchSelection)
@@ -567,6 +578,7 @@ class AppConfig(private val db: AppDatabase) {
                 it[PatchAttachments.patchArgs] = patchArgs
                 it[patchSelectionJson] = patchSelectionStr
                 it[optionOverridesJson] = optionOverridesStr
+                it[PatchAttachments.includeExperimentalVersions] = includeExperimentalVersions
             }
         } else {
             PatchAttachments.insert {
@@ -576,6 +588,7 @@ class AppConfig(private val db: AppDatabase) {
                 it[PatchAttachments.patchArgs] = patchArgs
                 it[patchSelectionJson] = patchSelectionStr
                 it[optionOverridesJson] = optionOverridesStr
+                it[PatchAttachments.includeExperimentalVersions] = includeExperimentalVersions
             }
         }
 
@@ -586,6 +599,7 @@ class AppConfig(private val db: AppDatabase) {
                 patchVersion = libRow[PatchLibraryTable.version],
                 supportedVersions = supportedVersions,
                 patchArgs = patchArgs,
+                includeExperimentalVersions = includeExperimentalVersions,
                 patchSelection = patchSelection,
                 optionOverrides = optionOverrides,
             )

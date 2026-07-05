@@ -451,6 +451,7 @@
         <select id="attachPatchId" required></select>
         <input id="attachSupportedVersions" type="text" placeholder="e.g. 1.2.3, 1.2.4 or * (leave empty to use the .mpp file's own versions)" />
         <input id="attachPatchArgs" type="text" placeholder="extra morphe args (optional)" />
+        <label class="check"><input id="attachIncludeExperimental" type="checkbox" /> Include experimental versions from the .mpp file (ignored if supported versions above is set)</label>
         <button type="submit" class="btn small">Attach</button>
       </form>
       <div class="actions">
@@ -1066,10 +1067,13 @@
         const customizedNote = (selectionCount || overrideCount)
           ? ` — <span class="entry-meta">${selectionCount + overrideCount} custom override(s)</span>`
           : '';
+        const experimentalNote = (!(attachment.supported_versions || []).length && attachment.include_experimental_versions)
+          ? ` — <span class="entry-meta">includes experimental versions</span>`
+          : '';
         row.innerHTML = `
           <div>
             <strong>${escapeHtml(attachment.patch_name)}</strong>
-            <span class="entry-meta"> — versions: ${(attachment.supported_versions || []).length ? escapeHtml(attachment.supported_versions.join(', ')) : 'from .mpp file'}${attachment.patch_args ? ' — args: ' + escapeHtml(attachment.patch_args) : ''}</span>${customizedNote}
+            <span class="entry-meta"> — versions: ${(attachment.supported_versions || []).length ? escapeHtml(attachment.supported_versions.join(', ')) : 'from .mpp file'}${attachment.patch_args ? ' — args: ' + escapeHtml(attachment.patch_args) : ''}</span>${customizedNote}${experimentalNote}
           </div>
           <div>
             <button class="btn small" data-configure-patch="${escapeHtml(attachment.patch_id)}">Configure</button>
@@ -1119,6 +1123,7 @@
         patch_id: attachPatchSelect.value,
         supported_versions: document.getElementById('attachSupportedVersions').value.trim(),
         patch_args: document.getElementById('attachPatchArgs').value.trim(),
+        include_experimental_versions: document.getElementById('attachIncludeExperimental').checked,
       };
 
       const res = await fetch(`/api/patch-targets/${targetId}/attachments`, {

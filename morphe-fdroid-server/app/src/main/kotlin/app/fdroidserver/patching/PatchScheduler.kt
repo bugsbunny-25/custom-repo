@@ -116,10 +116,26 @@ class PatchScheduler(
 
                 val processed = appConfig.processedPatchCacheKeys(target.id)
                 val supportedVersions = attachment.supportedVersions.ifEmpty {
-                    deriveSupportedVersions(libEntry, target.packageName)
+                    val derived = deriveSupportedVersions(libEntry, target.packageName)
+                    if (attachment.includeExperimentalVersions) {
+                        derived.versions
+                    } else {
+                        derived.versions.filterNot { it in derived.experimentalVersions }
+                    }
                 }
                 if (supportedVersions.isEmpty()) {
                     logger.warn("${target.id}: no supported_versions configured for patch '${attachment.patchId}' and none found in the .mpp file, skipping")
+                    continue
+                }
+
+                // If we've already patched the best version this patch supports, stop
+                // here - don't let the listedCandidate fallback below walk down to
+                // older, already-unprocessed versions just because they're next in
+                // listing order (that used to cause each subsequent pass to patch a
+                // progressively older version, which then pushed the real latest
+                // out of pruneOldVersions's keep-window).
+                val maxSupported = maxConcreteVersion(supportedVersions)
+                if (maxSupported != null && "$maxSupported::${attachment.patchId}" in processed) {
                     continue
                 }
 
@@ -128,23 +144,17 @@ class PatchScheduler(
                     cacheKey !in processed && matchesSupportedVersion(v.version, supportedVersions)
                 }
 
-                val maxSupported = maxConcreteVersion(supportedVersions)
                 val maxSupportedCandidate = if (maxSupported != null && versions.none { it.version == maxSupported }) {
-                    val maxCacheKey = "$maxSupported::${attachment.patchId}"
-                    if (maxCacheKey in processed) {
-                        null
-                    } else {
-                        logger.info(
-                            "${target.id}: max supported version $maxSupported for patch '${attachment.patchId}' " +
-                                "not in apkmirror listing, searching for it directly",
-                        )
-                        apkMirrorClient.findVersion(target.apkmirrorUrl, maxSupported).also {
-                            if (it == null) {
-                                logger.warn(
-                                    "${target.id}: could not find max supported version $maxSupported on apkmirror " +
-                                        "for patch '${attachment.patchId}'",
-                                )
-                            }
+                    logger.info(
+                        "${target.id}: max supported version $maxSupported for patch '${attachment.patchId}' " +
+                            "not in apkmirror listing, searching for it directly",
+                    )
+                    apkMirrorClient.findVersion(target.apkmirrorUrl, maxSupported).also {
+                        if (it == null) {
+                            logger.warn(
+                                "${target.id}: could not find max supported version $maxSupported on apkmirror " +
+                                    "for patch '${attachment.patchId}'",
+                            )
                         }
                     }
                 } else {
@@ -244,29 +254,35 @@ class PatchScheduler(
         }
     }
 
+    /** [versions]: every version the .mpp declares support for. [experimentalVersions]:
+     * the subset of those flagged experimental by morphe-patcher's `AppTarget.isExperimental` -
+     * excluded from [versions] by callers unless the attachment opts in
+     * (see `PatchScheduler.checkTarget`). */
+    private data class DerivedVersions(val versions: List<String>, val experimentalVersions: Set<String>)
+
     /** When an attachment doesn't specify supported_versions, fall back to
      * whatever the .mpp file itself declares (via [PatchLibrary]), filtered
      * to the target's package_name. A package with no version list in the
      * .mpp means "any version" (represented as a single "*" pattern). */
-    private fun deriveSupportedVersions(libEntry: AppConfig.PatchLibraryEntry, packageName: String): List<String> {
+    private fun deriveSupportedVersions(libEntry: AppConfig.PatchLibraryEntry, packageName: String): DerivedVersions {
         val patchFile = File(patchesDir, libEntry.file)
-        if (!patchFile.exists()) return emptyList()
+        if (!patchFile.exists()) return DerivedVersions(emptyList(), emptySet())
 
         val patches = try {
             patchLibrary.inspect(patchFile)
         } catch (e: Exception) {
             logger.warn("Could not read supported versions from '${libEntry.id}': $e")
-            return emptyList()
+            return DerivedVersions(emptyList(), emptySet())
         }
 
         for (patch in patches) {
             for (pkg in patch.packages) {
                 if (packageName.isNotBlank() && pkg.packageName != packageName) continue
-                if (pkg.versions.isEmpty()) return listOf("*")
-                return pkg.versions
+                if (pkg.versions.isEmpty()) return DerivedVersions(listOf("*"), emptySet())
+                return DerivedVersions(pkg.versions, pkg.experimentalVersions.toSet())
             }
         }
-        return emptyList()
+        return DerivedVersions(emptyList(), emptySet())
     }
 
     private fun matchesSupportedVersion(version: String, supportedVersions: List<String>): Boolean {
