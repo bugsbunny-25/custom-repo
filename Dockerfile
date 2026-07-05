@@ -1,47 +1,71 @@
-FROM debian:bookworm-slim
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build: the app itself (admin server, GitHub/APKMirror
+# scrapers, patch pipeline) is now 100% Kotlin (see morphe-fdroid-server/),
+# calling morphe-patcher directly instead of shelling out to a CLI. The only
+# remaining external dependency is `fdroidserver` (the `fdroid` CLI) - a
+# separate, actively-maintained Python project from the F-Droid
+# organization that generates/signs the repo index; we intentionally don't
+# reimplement it (see morphe-fdroid-server/plan.md §8), so Python still
+# appears in the final image, but only as that one unmodified third-party
+# tool - none of *this project's* application logic is Python anymore.
 
-RUN apt-get update && apt-get install -y \
+# ---------------------------------------------------------------------------
+# Stage 1: build the Kotlin app
+# ---------------------------------------------------------------------------
+FROM eclipse-temurin:26-jdk AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY morphe-fdroid-server/ .
+
+# morphe-patcher is a normal Gradle dependency resolved from GitHub Packages,
+# which requires an authenticated request even for public packages (see
+# settings.gradle.kts). The token is passed in as a BuildKit secret (never a
+# plain ARG/ENV - those get baked into the image's build history/layers):
+#   DOCKER_BUILDKIT=1 docker build \
+#     --secret id=github_token,env=GITHUB_TOKEN \
+#     --build-arg GITHUB_ACTOR=<your-github-username> \
+#     -t custom-repo .
+# GITHUB_ACTOR just needs to be *a* valid GitHub username for GHP's basic-auth
+# check - it does not need any access to MorpheApp/morphe-patcher itself; any
+# account's token works for reading a public package. In CI, the workflow's
+# own `secrets.GITHUB_TOKEN` + `github.actor` are used instead - see
+# .github/workflows/docker-publish.yml.
+ARG GITHUB_ACTOR
+ENV GITHUB_ACTOR=${GITHUB_ACTOR}
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN \
+    ./gradlew --no-daemon build -x test
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime image
+# ---------------------------------------------------------------------------
+FROM eclipse-temurin:26-jre
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
-    curl \
-    wget \
-    unzip \
-    openjdk-17-jdk-headless \
     nginx \
     supervisor \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up Android SDK
-ENV ANDROID_HOME=/opt/android-sdk
-ENV PATH=${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/34.0.0
+# fdroidserver: the only remaining external dependency, see header comment.
+RUN pip3 install --no-cache-dir fdroidserver --break-system-packages
 
-RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
-    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmd-tools.zip && \
-    unzip -q /tmp/cmd-tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
-    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
-    rm /tmp/cmd-tools.zip && \
-    yes | sdkmanager --licenses && \
-    sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-34"
-
-RUN pip3 install --no-cache-dir \
-    fdroidserver \
-    requests \
-    ruamel.yaml \
-    schedule \
-    --break-system-packages
-
-# Create directories
 RUN mkdir -p /srv/fdroid/repo \
+    /srv/fdroid/patched/repo \
     /srv/fdroid/metadata \
     /srv/fdroid/tmp \
-    /app
+    /srv/fdroid/patches \
+    /app/db
 
-# Copy files
-COPY update_checker.py init_repo.py config_ui.py /app/
+COPY --from=build /build/app/build/libs/*-all.jar /app/app.jar
+
 COPY nginx.conf /etc/nginx/sites-available/default
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
