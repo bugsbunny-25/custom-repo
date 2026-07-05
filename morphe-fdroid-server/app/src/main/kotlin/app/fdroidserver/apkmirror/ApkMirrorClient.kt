@@ -79,15 +79,29 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
         for (row in doc.select("div.appRow")) {
             val link = row.selectFirst("h5.appRowTitle a[href]") ?: continue
             val pageUrl = link.absUrl("href")
-            val text = link.text().trim()
-            val version = VERSION_RE.find(text)?.groupValues?.get(1) ?: text
+            val version = extractVersion(link.text().trim())
             if (!seen.add(version)) continue
             versions.add(VersionEntry(version, pageUrl))
         }
 
         logger.info("apkmirror: found ${versions.size} version(s) on $url")
+        logger.debug("apkmirror: versions on $url: ${versions.joinToString { it.version }}")
         return versions
     }
+
+    /**
+     * Pulls the version token out of an appRowTitle link's text (e.g.
+     * "AccuWeather: Weather Radar 21.1.12-2-rc" -> "21.1.12-2-rc"), pulled out
+     * of [getVersionsPage] so it's unit-testable without a network call (see
+     * `ApkMirrorClientTest`). Takes the first run of characters starting at a
+     * digit and continuing through any word/dot/dash characters (stopping at
+     * the next space) - covers plain dotted versions as well as suffixed ones
+     * like "-2-rc" or "-beta1" that a strict "digits and dots only" pattern
+     * would truncate, silently dropping the suffix and breaking matches
+     * against a `supported_versions` entry that includes it. Falls back to
+     * the full text if it contains no digit at all.
+     */
+    internal fun extractVersion(text: String): String = VERSION_RE.find(text)?.value ?: text
 
     /** Looks for [version] beyond what [getVersions] already returned, by
      * paging through the app's older-releases listing (APKMirror only shows
@@ -223,6 +237,6 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-        private val VERSION_RE = Regex("""(\d+(?:\.\d+){1,3})""")
+        private val VERSION_RE = Regex("""\d[\w.-]*""")
     }
 }

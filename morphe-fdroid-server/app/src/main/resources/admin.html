@@ -461,6 +461,28 @@
     </div>
   </div>
 
+  <div id="versionOverlay" class="overlay">
+    <div class="modal">
+      <h2>Patch Specific Version</h2>
+      <form id="versionForm">
+        <input type="hidden" id="versionTargetId" />
+        <div class="field">
+          <label for="versionNumber">Version</label>
+          <input id="versionNumber" type="text" required placeholder="e.g. 1.2.3" />
+        </div>
+        <div class="field">
+          <label for="versionPageUrl">APKMirror version page URL</label>
+          <input id="versionPageUrl" type="text" required placeholder="https://www.apkmirror.com/apk/.../app-name-1-2-3-release/" />
+        </div>
+        <div class="actions">
+          <button type="button" class="btn ghost" id="versionCancelBtn">Cancel</button>
+          <button type="submit" class="btn">Patch</button>
+        </div>
+        <div id="versionMsg" class="msg"></div>
+      </form>
+    </div>
+  </div>
+
   <div id="inspectOverlay" class="overlay">
     <div class="modal">
       <h2 id="inspectModalTitle">Patch Contents</h2>
@@ -916,6 +938,7 @@
           <td>${versionsHtml}</td>
           <td>
             <button class="btn small" data-patch-now="${target.id}">Patch Now</button>
+            <button class="btn small" data-patch-version="${target.id}">Patch Specific Version</button>
             <button class="btn small" data-edit-target="${target.id}">Edit</button>
             <button class="btn ghost small" data-manage-attachments="${target.id}">Patches</button>
             <button class="btn ghost small" data-delete-target="${target.id}">Delete</button>
@@ -939,6 +962,7 @@
             btn.textContent = originalText;
           }
         });
+        tr.querySelector('[data-patch-version]').addEventListener('click', () => openVersionModal(target.id));
         tr.querySelector('[data-edit-target]').addEventListener('click', () => openPatchEditor(target));
         tr.querySelector('[data-manage-attachments]').addEventListener('click', () => openAttachManager(target.id));
         tr.querySelector('[data-delete-target]').addEventListener('click', async () => {
@@ -1107,6 +1131,55 @@
     });
     attachOverlay.addEventListener('click', (e) => {
       if (e.target === attachOverlay) attachOverlay.classList.remove('open');
+    });
+
+    const versionOverlay = document.getElementById('versionOverlay');
+    const versionForm = document.getElementById('versionForm');
+    const versionMsg = document.getElementById('versionMsg');
+
+    function openVersionModal(targetId) {
+      versionMsg.textContent = '';
+      document.getElementById('versionTargetId').value = targetId;
+      document.getElementById('versionNumber').value = '';
+      document.getElementById('versionPageUrl').value = '';
+      versionOverlay.classList.add('open');
+    }
+
+    document.getElementById('versionCancelBtn').addEventListener('click', () => {
+      versionOverlay.classList.remove('open');
+    });
+    versionOverlay.addEventListener('click', (e) => {
+      if (e.target === versionOverlay) versionOverlay.classList.remove('open');
+    });
+
+    versionForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      versionMsg.textContent = '';
+      const targetId = document.getElementById('versionTargetId').value;
+      const version = document.getElementById('versionNumber').value.trim();
+      const versionPageUrl = document.getElementById('versionPageUrl').value.trim();
+
+      const submitBtn = versionForm.querySelector('button[type="submit"]');
+      submitBtn.disabled = true;
+      const originalText = submitBtn.textContent;
+      submitBtn.textContent = 'Patching…';
+      try {
+        const res = await fetch(`/api/patch-targets/${targetId}/run-version`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version, version_page_url: versionPageUrl }),
+        });
+        const result = await res.json();
+        if (!res.ok) {
+          versionMsg.textContent = result.error || 'Failed to patch that version';
+          return;
+        }
+        versionOverlay.classList.remove('open');
+        await loadPatchTargets();
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalText;
+      }
     });
 
     attachForm.addEventListener('submit', async (e) => {

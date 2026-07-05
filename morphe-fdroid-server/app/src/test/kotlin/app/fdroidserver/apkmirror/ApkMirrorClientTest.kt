@@ -50,4 +50,27 @@ class ApkMirrorClientTest {
         val document = Jsoup.parse("<html><body>no variants here</body></html>", "https://www.apkmirror.com/")
         assertNull(client.pickBestVariantHref(document))
     }
+
+    @Test
+    fun `extracts a plain dotted version`() {
+        assertEquals("2.24.15.73", client.extractVersion("WhatsApp Messenger 2.24.15.73"))
+    }
+
+    @Test
+    fun `keeps a rc suffix instead of truncating at the dash`() {
+        assertEquals(
+            "21.1.12-2-rc",
+            client.extractVersion("AccuWeather: Weather Radar 21.1.12-2-rc"),
+        )
+    }
+
+    @Test
+    fun `keeps a beta suffix`() {
+        assertEquals("1.2.3-beta1", client.extractVersion("Some App 1.2.3-beta1"))
+    }
+
+    @Test
+    fun `falls back to the full text when there is no digit`() {
+        assertEquals("Some App Latest", client.extractVersion("Some App Latest"))
+    }
 }
