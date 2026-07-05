@@ -148,7 +148,7 @@ class ApkMirrorClient(private val logger: Logger = LoggerFactory.getLogger(ApkMi
         val url = appUrl.trimEnd('/') + "/feed/"
         val versions = parseFeedVersions(get(url, referer = appUrl))
         logger.info("apkmirror: found ${versions.size} version(s) on $url")
-        logger.debug("apkmirror: versions on $url: ${versions.joinToString { it.version }}")
+        logger.info("apkmirror: versions on $url: ${versions.joinToString { it.version }}")
         return versions
     }
 
