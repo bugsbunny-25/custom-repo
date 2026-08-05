@@ -223,7 +223,7 @@
 
     <div id="patchingPanel" class="tab-panel">
       <h1>Patch Library</h1>
-      <p class="sub">Upload Morphe (.mpp) patch files here once, then attach them to any number of apps below. Re-uploading a patch's content here updates it for every app using it (their cached versions are re-checked).</p>
+      <p class="sub">Upload Morphe (.mpp) patch files here once, then attach them to any number of apps below. Re-uploading a patch's content here updates it for every app using it (their cached versions are re-checked). Instead of uploading manually, a patch can also be linked to a GitHub repo to auto-download its .mpp from new releases.</p>
       <div style="margin: 0 0 12px;">
         <button id="newLibraryPatchBtn" class="btn">Upload Patch</button>
       </div>
@@ -235,6 +235,7 @@
               <th>Name</th>
               <th>File</th>
               <th>Version</th>
+              <th>GitHub repo</th>
               <th>Updated</th>
               <th>Action</th>
             </tr>
@@ -279,6 +280,7 @@
               <th>Name</th>
               <th>File</th>
               <th>Version</th>
+              <th>GitHub repo</th>
               <th>Updated</th>
               <th>Action</th>
             </tr>
@@ -499,8 +501,14 @@
           <label for="libraryVersion">Version label (optional, e.g. matches the app version it targets)</label>
           <input id="libraryVersion" type="text" />
         </div>
+        <div class="field">
+          <label for="libraryGithubRepo">GitHub repo (optional, e.g. owner/repo - auto-downloads the .mpp asset from its releases instead of manual uploads above)</label>
+          <input id="libraryGithubRepo" type="text" placeholder="owner/repo" />
+        </div>
+        <label class="check"><input id="libraryGithubIncludePrereleases" type="checkbox" /> Include pre-releases</label>
         <div class="actions">
           <button type="button" class="btn ghost" id="libraryCancelBtn">Cancel</button>
+          <button type="button" class="btn ghost" id="libraryCheckGithubBtn" style="display:none;">Check GitHub now</button>
           <button type="submit" class="btn">Save</button>
         </div>
         <div id="libraryMsg" class="msg"></div>
@@ -757,25 +765,48 @@
       channel.libraryById = {};
 
       if (!data.library.length) {
-        libraryRows.innerHTML = '<tr><td colspan="6">No patches uploaded yet.</td></tr>';
+        libraryRows.innerHTML = '<tr><td colspan="7">No patches uploaded yet.</td></tr>';
       } else {
         for (const patch of data.library) {
           channel.libraryById[patch.id] = patch;
           const tr = document.createElement('tr');
+          const githubCell = patch.github_repo
+            ? `${escapeHtml(patch.github_repo)}${patch.github_include_prereleases ? ' <span class="entry-meta">(pre-releases)</span>' : ''}`
+            : '<span class="entry-meta">manual upload</span>';
           tr.innerHTML = `
             <td>${escapeHtml(patch.id)}</td>
             <td><strong>${escapeHtml(patch.name)}</strong></td>
             <td>${escapeHtml(patch.file)}</td>
             <td>${escapeHtml(patch.version || '')}</td>
+            <td>${githubCell}</td>
             <td><span class="entry-meta">${escapeHtml(patch.updated_at || '')}</span></td>
             <td>
               <button class="btn small" data-update-patch="${patch.id}">Update</button>
+              ${patch.github_repo ? `<button class="btn ghost small" data-check-github="${patch.id}">Check GitHub now</button>` : ''}
               <button class="btn ghost small" data-inspect-patch="${patch.id}">View Packages</button>
               <button class="btn ghost small" data-delete-patch="${patch.id}">Delete</button>
             </td>
           `;
           tr.querySelector('[data-update-patch]').addEventListener('click', () => openLibraryEditor(channel, patch));
           tr.querySelector('[data-inspect-patch]').addEventListener('click', () => openInspect(channel, patch.id, patch.name));
+          const checkGithubBtn = tr.querySelector('[data-check-github]');
+          if (checkGithubBtn) {
+            checkGithubBtn.addEventListener('click', async () => {
+              checkGithubBtn.disabled = true;
+              checkGithubBtn.textContent = 'Checking...';
+              try {
+                const checkRes = await fetch(`${channel.apiLibrary}/${patch.id}/check-github`, { method: 'POST' });
+                const checkData = await checkRes.json();
+                await loadLibrary(channel);
+                if (checkRes.ok && !checkData.updated) {
+                  alert('Already up to date - no newer release found.');
+                }
+              } finally {
+                checkGithubBtn.disabled = false;
+                checkGithubBtn.textContent = 'Check GitHub now';
+              }
+            });
+          }
           tr.querySelector('[data-delete-patch]').addEventListener('click', async () => {
             if (!confirm(`Delete patch "${patch.name}"? It will be detached from any app using it.`)) return;
             const delRes = await fetch(`${channel.apiLibrary}/${patch.id}`, { method: 'DELETE' });
@@ -791,6 +822,8 @@
       if (channel === activeChannel) populateAttachPatchOptions();
     }
 
+    const libraryCheckGithubBtn = document.getElementById('libraryCheckGithubBtn');
+
     function openNewLibraryPatch(channel) {
       activeChannel = channel;
       libraryFormMode = 'new';
@@ -801,9 +834,12 @@
       document.getElementById('libraryId').disabled = false;
       document.getElementById('libraryName').value = '';
       document.getElementById('libraryFile').value = '';
-      document.getElementById('libraryFile').required = true;
-      document.getElementById('libraryFileHint').textContent = '';
+      document.getElementById('libraryFile').required = false;
+      document.getElementById('libraryFileHint').textContent = '(required unless a GitHub repo is set below)';
       document.getElementById('libraryVersion').value = '';
+      document.getElementById('libraryGithubRepo').value = '';
+      document.getElementById('libraryGithubIncludePrereleases').checked = false;
+      libraryCheckGithubBtn.style.display = 'none';
       libraryOverlay.classList.add('open');
     }
 
@@ -820,6 +856,28 @@
       document.getElementById('libraryFile').required = false;
       document.getElementById('libraryFileHint').textContent = '(leave empty to keep the current file)';
       document.getElementById('libraryVersion').value = patch.version || '';
+      document.getElementById('libraryGithubRepo').value = patch.github_repo || '';
+      document.getElementById('libraryGithubIncludePrereleases').checked = !!patch.github_include_prereleases;
+      libraryCheckGithubBtn.style.display = patch.github_repo ? '' : 'none';
+      libraryCheckGithubBtn.onclick = async () => {
+        libraryCheckGithubBtn.disabled = true;
+        libraryCheckGithubBtn.textContent = 'Checking...';
+        try {
+          const checkRes = await fetch(`${channel.apiLibrary}/${patch.id}/check-github`, { method: 'POST' });
+          const checkData = await checkRes.json();
+          if (checkRes.ok) {
+            libraryMsg.textContent = checkData.updated ? 'Imported a newer release from GitHub.' : 'Already up to date - no newer release found.';
+          } else {
+            libraryMsg.textContent = checkData.error || 'Failed to check GitHub';
+          }
+          await loadLibrary(channel);
+          const refreshed = channel.libraryById[patch.id];
+          if (refreshed) openLibraryEditor(channel, refreshed);
+        } finally {
+          libraryCheckGithubBtn.disabled = false;
+          libraryCheckGithubBtn.textContent = 'Check GitHub now';
+        }
+      };
       libraryOverlay.classList.add('open');
     }
 
@@ -838,9 +896,10 @@
       const originalId = document.getElementById('libraryOriginalId').value;
       const fileInput = document.getElementById('libraryFile');
       const file = fileInput.files[0];
+      const githubRepo = document.getElementById('libraryGithubRepo').value.trim();
 
-      if (libraryFormMode === 'new' && !file) {
-        libraryMsg.textContent = 'Choose a .mpp file';
+      if (libraryFormMode === 'new' && !file && !githubRepo) {
+        libraryMsg.textContent = 'Choose a .mpp file or set a GitHub repo';
         return;
       }
 
@@ -848,6 +907,8 @@
         id: document.getElementById('libraryId').value.trim(),
         name: document.getElementById('libraryName').value.trim(),
         version: document.getElementById('libraryVersion').value.trim(),
+        github_repo: githubRepo,
+        github_include_prereleases: document.getElementById('libraryGithubIncludePrereleases').checked,
       };
       if (file) {
         payload.filename = file.name;
