@@ -2,6 +2,7 @@ package app.fdroidserver
 
 import app.fdroidserver.admin.AdminServer
 import app.fdroidserver.apkmirror.ApkMirrorClient
+import app.fdroidserver.apkpure.ApkPureClient
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.config.AppDatabase
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
@@ -61,17 +62,18 @@ fun main() {
     patchesTvDir.mkdirs()
 
     val apkMirrorClient = ApkMirrorClient()
+    val apkPureClient = ApkPureClient()
     val bundleMerger = BundleMerger()
     val patchApplier = PatchApplier()
     val signing = PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-keystore.jks"))
     val signingTv = PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-tv-keystore.jks"))
     val patchScheduler = PatchScheduler(
-        appConfig, apkMirrorClient, patchLibrary, bundleMerger,
+        appConfig, apkMirrorClient, apkPureClient, patchLibrary, bundleMerger,
         patchApplier, patchesDir, patchedRepoDir, tmpDir, fdroidRepoManager, signing,
         schema = AppConfig.PatchSchemas.Mobile,
     )
     val patchSchedulerTv = PatchScheduler(
-        appConfig, apkMirrorClient, patchLibrary, bundleMerger,
+        appConfig, apkMirrorClient, apkPureClient, patchLibrary, bundleMerger,
         patchApplier, patchesTvDir, patchedTvRepoDir, tmpDir, fdroidRepoManager, signingTv,
         schema = AppConfig.PatchSchemas.Tv,
     )

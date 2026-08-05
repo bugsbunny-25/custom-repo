@@ -1,5 +1,6 @@
 package app.fdroidserver.apkmirror
 
+import app.fdroidserver.scraper.ScraperClient
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
@@ -148,7 +149,7 @@ class ApkMirrorClientTest {
             </channel></rss>
         """.trimIndent()
 
-        assertEquals(emptyList<ApkMirrorClient.VersionEntry>(), client.parseFeedVersions(xml))
+        assertEquals(emptyList<ScraperClient.VersionEntry>(), client.parseFeedVersions(xml))
     }
 
     // --- Cloudflare-challenge handling -------------------------------------
@@ -400,17 +401,17 @@ class ApkMirrorClientTest {
 
     @Test
     fun `accepts a plain http and https FlareSolverr URL`() {
-        assertTrue(ApkMirrorClient.isValidFlareSolverrUrl("http://flaresolverr:8191/v1"))
-        assertTrue(ApkMirrorClient.isValidFlareSolverrUrl("https://flaresolverr.example.com/v1"))
+        assertTrue(ScraperClient.isValidFlareSolverrUrl("http://flaresolverr:8191/v1"))
+        assertTrue(ScraperClient.isValidFlareSolverrUrl("https://flaresolverr.example.com/v1"))
     }
 
     @Test
     fun `rejects a blank, schemeless, or non-http FlareSolverr URL`() {
-        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl(""))
-        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl("   "))
-        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl("flaresolverr:8191/v1"))
-        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl("not a url"))
-        assertTrue(!ApkMirrorClient.isValidFlareSolverrUrl("ftp://flaresolverr:8191/v1"))
+        assertTrue(!ScraperClient.isValidFlareSolverrUrl(""))
+        assertTrue(!ScraperClient.isValidFlareSolverrUrl("   "))
+        assertTrue(!ScraperClient.isValidFlareSolverrUrl("flaresolverr:8191/v1"))
+        assertTrue(!ScraperClient.isValidFlareSolverrUrl("not a url"))
+        assertTrue(!ScraperClient.isValidFlareSolverrUrl("ftp://flaresolverr:8191/v1"))
     }
 
     @Test

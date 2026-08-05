@@ -244,7 +244,7 @@
       </div>
 
       <h1 style="margin-top: 32px;">Patched Apps</h1>
-      <p class="sub">Watch an APKMirror app page for new versions and publish patched builds to the /patched-repo F-Droid repo. Only the newest 3 versions per (app, patch) are kept.</p>
+      <p class="sub">Watch an APKMirror app page for new versions (optionally falling back to APKPure for versions APKMirror doesn't list) and publish patched builds to the /patched-repo F-Droid repo. Only the newest 3 versions per (app, patch) are kept.</p>
       <div style="margin: 0 0 12px; display: flex; gap: 8px;">
         <button id="newPatchBtn" class="btn">New Patch Target</button>
         <button id="patchAllBtn" class="btn ghost">Patch All</button>
@@ -288,7 +288,7 @@
       </div>
 
       <h1 style="margin-top: 32px;">Patched Apps (TV)</h1>
-      <p class="sub">Watch an APKMirror app page for new versions and publish patched builds to the /patched-tv/repo F-Droid repo. Only the newest 3 versions per (app, patch) are kept.</p>
+      <p class="sub">Watch an APKMirror app page for new versions (optionally falling back to APKPure for versions APKMirror doesn't list) and publish patched builds to the /patched-tv/repo F-Droid repo. Only the newest 3 versions per (app, patch) are kept.</p>
       <div style="margin: 0 0 12px; display: flex; gap: 8px;">
         <button id="newPatchBtnTv" class="btn">New Patch Target</button>
         <button id="patchAllBtnTv" class="btn ghost">Patch All</button>
@@ -459,6 +459,10 @@
           <input id="patchApkmirrorUrl" type="text" required />
         </div>
         <div class="field">
+          <label for="patchApkpureUrl">APKPure app URL (optional, used as a fallback when a version isn't on APKMirror)</label>
+          <input id="patchApkpureUrl" type="text" placeholder="https://apkpure.com/app-name/com.example.app" />
+        </div>
+        <div class="field">
           <label for="patchPackageName">Package name (optional, verified against downloaded APK)</label>
           <input id="patchPackageName" type="text" />
         </div>
@@ -533,8 +537,8 @@
           <input id="versionNumber" type="text" required placeholder="e.g. 1.2.3" />
         </div>
         <div class="field">
-          <label for="versionPageUrl">APKMirror version page URL</label>
-          <input id="versionPageUrl" type="text" required placeholder="https://www.apkmirror.com/apk/.../app-name-1-2-3-release/" />
+          <label for="versionPageUrl">APKMirror version page URL, or APKPure download URL</label>
+          <input id="versionPageUrl" type="text" required placeholder="https://www.apkmirror.com/apk/.../app-name-1-2-3-release/  or  https://apkpure.com/.../com.example.app/download/1.2.3" />
         </div>
         <div class="actions">
           <button type="button" class="btn ghost" id="versionCancelBtn">Cancel</button>
@@ -1009,7 +1013,10 @@
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td><strong>${escapeHtml(target.name)}</strong><br/><span class="entry-meta">${escapeHtml(target.id)}</span></td>
-          <td><a href="${escapeHtml(target.apkmirror_url)}" target="_blank" rel="noopener">${escapeHtml(target.apkmirror_url)}</a></td>
+          <td>
+            <a href="${escapeHtml(target.apkmirror_url)}" target="_blank" rel="noopener">${escapeHtml(target.apkmirror_url)}</a>
+            ${target.apkpure_url ? `<div class="entry-meta" style="margin-top:4px;">APKPure: <a href="${escapeHtml(target.apkpure_url)}" target="_blank" rel="noopener">${escapeHtml(target.apkpure_url)}</a></div>` : ''}
+          </td>
           <td>${attachedHtml}</td>
           <td>${versionsHtml}</td>
           <td>
@@ -1068,6 +1075,7 @@
       document.getElementById('patchId').disabled = true;
       document.getElementById('patchName').value = target.name;
       document.getElementById('patchApkmirrorUrl').value = target.apkmirror_url;
+      document.getElementById('patchApkpureUrl').value = target.apkpure_url || '';
       document.getElementById('patchPackageName').value = target.package_name || '';
       document.getElementById('patchEnabled').checked = target.enabled;
       patchOverlay.classList.add('open');
@@ -1083,6 +1091,7 @@
       document.getElementById('patchId').disabled = false;
       document.getElementById('patchName').value = '';
       document.getElementById('patchApkmirrorUrl').value = '';
+      document.getElementById('patchApkpureUrl').value = '';
       document.getElementById('patchPackageName').value = '';
       document.getElementById('patchEnabled').checked = true;
       patchOverlay.classList.add('open');
@@ -1131,6 +1140,7 @@
         id: document.getElementById('patchId').value.trim(),
         name: document.getElementById('patchName').value.trim(),
         apkmirror_url: document.getElementById('patchApkmirrorUrl').value.trim(),
+        apkpure_url: document.getElementById('patchApkpureUrl').value.trim(),
         package_name: document.getElementById('patchPackageName').value.trim(),
         enabled: document.getElementById('patchEnabled').checked,
       };

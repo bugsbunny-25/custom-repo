@@ -1,8 +1,10 @@
 package app.fdroidserver.patching
 
 import app.fdroidserver.apkmirror.ApkMirrorClient
+import app.fdroidserver.apkpure.ApkPureClient
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
+import app.fdroidserver.scraper.ScraperClient
 import java.io.File
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -10,9 +12,11 @@ import org.slf4j.LoggerFactory
 /**
  * Orchestrates the whole patching pipeline: for each enabled patch target
  * (an app), check APKMirror for a new version matching one of its attached
- * library patches, download (and merge, if it's a bundle) the APK, apply
- * the patch via [PatchApplier], and publish the result into the patched
- * F-Droid repo - keeping only the newest 3 versions per (app, patch) pair.
+ * library patches - falling back to APKPure for versions APKMirror doesn't
+ * list, when the target has an APKPure URL configured - download (and merge,
+ * if it's a bundle) the APK, apply the patch via [PatchApplier], and publish
+ * the result into the patched F-Droid repo - keeping only the newest 3
+ * versions per (app, patch) pair.
  *
  * Direct Kotlin port of the orchestration in the old Python
  * `patch_checker.py`'s `check_for_updates()`. The output filename no longer
@@ -25,6 +29,7 @@ import org.slf4j.LoggerFactory
 class PatchScheduler(
     private val appConfig: AppConfig,
     private val apkMirrorClient: ApkMirrorClient,
+    private val apkPureClient: ApkPureClient,
     private val patchLibrary: PatchLibrary,
     private val bundleMerger: BundleMerger,
     private val patchApplier: PatchApplier,
@@ -60,8 +65,24 @@ class PatchScheduler(
      * doesn't look like a usable http(s) URL, so a blank/malformed setting
      * just disables the fallback rather than misbehaving. */
     private suspend fun refreshFlareSolverrUrl() {
-        apkMirrorClient.flareSolverrUrl = appConfig.getSettings().flareSolverrUrl
+        val url = appConfig.getSettings().flareSolverrUrl
+        apkMirrorClient.flareSolverrUrl = url
+        apkPureClient.flareSolverrUrl = url
     }
+
+    /** Which source a candidate version (and its download page) came from, so
+     * [prepareApk] resolves/downloads it through the right client. */
+    private enum class Source { APKMIRROR, APKPURE }
+
+    private fun clientFor(source: Source): ScraperClient =
+        if (source == Source.APKPURE) apkPureClient else apkMirrorClient
+
+    /** APKPure download/app URLs live under apkpure.com (and its download
+     * CDNs); anything else is treated as APKMirror. Used by
+     * [runSpecificVersion] to route a user-pasted version URL to the right
+     * client. */
+    private fun sourceForUrl(url: String): Source =
+        if (Regex("""apkpure\.""", RegexOption.IGNORE_CASE).containsMatchIn(url)) Source.APKPURE else Source.APKMIRROR
 
     /** Runs the patching pipeline for a single enabled target, identified by
      * [targetId] - used by the admin UI's "Patch now" button, as opposed to
@@ -90,7 +111,10 @@ class PatchScheduler(
      * is taken as user input rather than scraped off the page, since
      * APKMirror version strings don't reliably follow a single numeric
      * pattern (dates, build hashes, "beta"/"rc" suffixes, etc.) that a regex
-     * could extract for every app. Returns whether anything was published. */
+     * could extract for every app. [versionPageUrl] may be an APKMirror
+     * version page or an APKPure `/download/{version}` page - the source is
+     * detected from the URL host so either works. Returns whether anything was
+     * published. */
     suspend fun runSpecificVersion(targetId: String, version: String, versionPageUrl: String): Boolean {
         refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById(schema)
@@ -107,7 +131,7 @@ class PatchScheduler(
         var updated = false
         var preparedApk: File? = null
         try {
-            preparedApk = prepareApk(target.id, version, versionPageUrl)
+            preparedApk = prepareApk(target.id, version, versionPageUrl, sourceForUrl(versionPageUrl))
             if (preparedApk == null) return false
 
             for (attachment in target.patches) {
@@ -158,13 +182,38 @@ class PatchScheduler(
         return checkTarget(target, library, versions)
     }
 
+    /** A candidate version paired with the source that will resolve/download
+     * it (see [prepareApk]). */
+    private data class SourcedCandidate(val entry: ScraperClient.VersionEntry, val source: Source)
+
     private suspend fun checkTarget(
         target: AppConfig.EnabledPatchTarget,
         library: Map<String, AppConfig.PatchLibraryEntry>,
-        versions: List<ApkMirrorClient.VersionEntry>,
+        apkmirrorVersions: List<ScraperClient.VersionEntry>,
     ): Boolean {
         var updated = false
         val downloadedApks = mutableMapOf<String, File>() // version -> prepared (possibly merged) apk
+
+        // APKPure is a fallback: only fetched (once, memoized) when APKMirror
+        // doesn't list a version an attachment needs, and only if the target
+        // actually has an APKPure URL configured. A fetch failure logs and
+        // yields an empty list rather than sinking the whole target - APKMirror
+        // is still the primary source.
+        var apkpureFetched = false
+        var apkpureVersionsCache: List<ScraperClient.VersionEntry> = emptyList()
+        fun apkpureVersions(): List<ScraperClient.VersionEntry> {
+            if (target.apkpureUrl.isBlank()) return emptyList()
+            if (!apkpureFetched) {
+                apkpureFetched = true
+                apkpureVersionsCache = try {
+                    apkPureClient.getVersions(target.apkpureUrl)
+                } catch (e: Exception) {
+                    logger.error("${target.id}: error fetching apkpure versions: $e")
+                    emptyList()
+                }
+            }
+            return apkpureVersionsCache
+        }
 
         try {
             for (attachment in target.patches) {
@@ -205,35 +254,47 @@ class PatchScheduler(
                     continue
                 }
 
-                val listedCandidate = versions.firstOrNull { v ->
-                    val cacheKey = "${v.version}::${attachment.patchId}"
-                    cacheKey !in processed && matchesSupportedVersion(v.version, supportedVersions)
-                }
+                fun matchIn(list: List<ScraperClient.VersionEntry>): ScraperClient.VersionEntry? =
+                    list.firstOrNull { v ->
+                        val cacheKey = "${v.version}::${attachment.patchId}"
+                        cacheKey !in processed && matchesSupportedVersion(v.version, supportedVersions)
+                    }
+
+                // Prefer APKMirror; only reach for the APKPure fallback (which
+                // is what triggers its lazy fetch) when APKMirror doesn't list
+                // a needed version and an APKPure URL is configured.
+                val listedCandidate = matchIn(apkmirrorVersions)?.let { SourcedCandidate(it, Source.APKMIRROR) }
+                    ?: matchIn(apkpureVersions())?.let { SourcedCandidate(it, Source.APKPURE) }
 
                 if (listedCandidate == null) {
                     // APKMirror's feed only ever exposes its newest ~10
                     // releases and has no pagination, so a pinned version
                     // that isn't in it can't be found any other way - unlike
                     // the old HTML listing this replaced, there's no history
-                    // left to page through.
+                    // left to page through. APKPure (when configured) is the
+                    // one extra place to look, so only warn about a pinned
+                    // version once it's absent from both.
                     concreteSupported
                         .filterNot { "$it::${attachment.patchId}" in processed }
-                        .filterNot { pinned -> versions.any { it.version == pinned } }
+                        .filterNot { pinned ->
+                            apkmirrorVersions.any { it.version == pinned } || apkpureVersions().any { it.version == pinned }
+                        }
                         .forEach { pinned ->
+                            val alsoApkpure = if (target.apkpureUrl.isNotBlank()) " or apkpure's version list" else ""
                             logger.warn(
                                 "${target.id}: configured version $pinned for patch '${attachment.patchId}' " +
-                                    "not in apkmirror's feed, skipping",
+                                    "not in apkmirror's feed$alsoApkpure, skipping",
                             )
                         }
                 }
 
                 val candidate = listedCandidate ?: continue
 
-                val version = candidate.version
-                logger.info("${target.id}: found new patchable version $version for patch '${attachment.patchId}'")
+                val version = candidate.entry.version
+                logger.info("${target.id}: found new patchable version $version for patch '${attachment.patchId}' (source: ${candidate.source.name.lowercase()})")
 
                 val preparedApk = downloadedApks.getOrPut(version) {
-                    prepareApk(target.id, version, candidate.pageUrl) ?: continue
+                    prepareApk(target.id, version, candidate.entry.pageUrl, candidate.source) ?: continue
                 }
 
                 if (applyPatchToVersion(target, attachment, libEntry, version, preparedApk)) updated = true
@@ -307,16 +368,17 @@ class PatchScheduler(
         }
     }
 
-    /** Downloads the APK for [version] (merging it first if it's an .apkm
-     * bundle), or null on failure. */
-    private fun prepareApk(targetId: String, version: String, pageUrl: String): File? {
-        val downloadInfo = apkMirrorClient.resolveDownloadUrl(pageUrl)
+    /** Downloads the APK for [version] from [source] (merging it first if
+     * it's an .apkm/.xapk bundle), or null on failure. */
+    private fun prepareApk(targetId: String, version: String, pageUrl: String, source: Source): File? {
+        val client = clientFor(source)
+        val downloadInfo = client.resolveDownloadUrl(pageUrl)
         if (downloadInfo == null) {
             logger.error("$targetId: failed to resolve download URL for $version")
             return null
         }
         val rawFile = File(tmpDir, "$targetId-$version-download.bin")
-        if (!apkMirrorClient.downloadApk(downloadInfo.url, rawFile, downloadInfo.referer)) {
+        if (!client.downloadApk(downloadInfo.url, rawFile, downloadInfo.referer)) {
             logger.error("$targetId: failed to download $version")
             return null
         }

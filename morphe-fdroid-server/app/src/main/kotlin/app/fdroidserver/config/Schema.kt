@@ -88,11 +88,16 @@ open class PatchLibrarySchema(name: String) : Table(name) {
 object PatchLibraryTable : PatchLibrarySchema("patch_library")
 object PatchLibraryTableTv : PatchLibrarySchema("patch_library_tv")
 
-/** Apps watched on APKMirror for patching. */
+/** Apps watched on APKMirror (with APKPure as an optional fallback) for
+ * patching. */
 open class PatchTargetsSchema(name: String) : Table(name) {
     val id = varchar("id", 255)
     val name = varchar("name", 255).default("")
     val apkmirrorUrl = varchar("apkmirror_url", 512).default("")
+    // Optional fallback source, checked when a pinned version isn't found on
+    // APKMirror. Blank = no fallback. Added after apkmirror_url, so existing
+    // databases pick it up via createMissingTablesAndColumns' ALTER TABLE.
+    val apkpureUrl = varchar("apkpure_url", 512).default("")
     val packageName = varchar("package_name", 255).default("")
     val enabled = bool("enabled").default(true)
 

@@ -31,17 +31,23 @@ import java.util.zip.ZipFile
 class BundleMerger(private val logger: Logger = LoggerFactory.getLogger(BundleMerger::class.java.name)) {
 
     /**
-     * A plain APK's zip has `AndroidManifest.xml` at its root; an
-     * `.apkm`/`.xapk`/`.apks` bundle instead has `base.apk` (and the real
-     * manifest lives inside that). Check the extension first (cheap), and
-     * fall back to inspecting zip entries for files with no/ambiguous
-     * extension (APKMirror's `download.php` URLs don't always carry a
-     * useful one).
+     * A plain APK's zip has `AndroidManifest.xml`/`classes.dex` at its root and
+     * never a nested `.apk`; a bundle instead packs the split APKs as nested
+     * `.apk` entries - `base.apk` for APKMirror's `.apkm`/`.apks`, or
+     * `{package}.apk` + `config.*.apk` splits for APKPure's `.xapk` (which has
+     * no `base.apk`). Check the extension first (cheap), then fall back to
+     * inspecting zip entries for any nested `.apk`, since the download URLs
+     * (APKMirror's `download.php`, APKPure's CDN links) don't always carry a
+     * useful extension.
      */
     fun isBundle(file: File): Boolean {
         if (file.extension.lowercase() in BUNDLE_EXTENSIONS) return true
         return runCatching {
-            ZipFile(file).use { zip -> zip.getEntry("base.apk") != null }
+            ZipFile(file).use { zip ->
+                zip.entries().asSequence().any { entry ->
+                    !entry.isDirectory && entry.name.substringAfterLast('/').endsWith(".apk", ignoreCase = true)
+                }
+            }
         }.getOrDefault(false)
     }
 
