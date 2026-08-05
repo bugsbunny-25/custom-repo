@@ -440,6 +440,7 @@ class AppConfig(private val db: AppDatabase) {
         val id: String,
         val name: String,
         val apkmirrorUrl: String,
+        val apkpureUrl: String,
         val packageName: String,
         val enabled: Boolean,
         val patches: List<PatchAttachmentView>,
@@ -494,6 +495,7 @@ class AppConfig(private val db: AppDatabase) {
                 id = id,
                 name = row[schema.targets.name],
                 apkmirrorUrl = row[schema.targets.apkmirrorUrl],
+                apkpureUrl = row[schema.targets.apkpureUrl],
                 packageName = row[schema.targets.packageName],
                 enabled = row[schema.targets.enabled],
                 patches = attachmentsFor(schema, id),
@@ -507,6 +509,7 @@ class AppConfig(private val db: AppDatabase) {
         val id: String,
         val name: String = "",
         val apkmirrorUrl: String,
+        val apkpureUrl: String = "",
         val packageName: String = "",
         val enabled: Boolean = true,
     )
@@ -521,6 +524,7 @@ class AppConfig(private val db: AppDatabase) {
             it[id] = payload.id
             it[name] = payload.name.ifBlank { payload.id }
             it[apkmirrorUrl] = payload.apkmirrorUrl
+            it[apkpureUrl] = payload.apkpureUrl
             it[packageName] = payload.packageName
             it[enabled] = payload.enabled
         }
@@ -532,6 +536,7 @@ class AppConfig(private val db: AppDatabase) {
         val updated = schema.targets.update({ schema.targets.id eq id }) {
             it[name] = payload.name.ifBlank { id }
             it[apkmirrorUrl] = payload.apkmirrorUrl
+            it[apkpureUrl] = payload.apkpureUrl
             it[packageName] = payload.packageName
             it[enabled] = payload.enabled
         }
@@ -717,6 +722,7 @@ class AppConfig(private val db: AppDatabase) {
     data class EnabledPatchTarget(
         val id: String,
         val apkmirrorUrl: String,
+        val apkpureUrl: String,
         val packageName: String,
         val patches: List<PatchAttachmentView>,
     )
@@ -724,7 +730,13 @@ class AppConfig(private val db: AppDatabase) {
     suspend fun listEnabledPatchTargets(schema: PatchSchema): List<EnabledPatchTarget> = db.tx {
         schema.targets.selectAll().where { schema.targets.enabled eq true }.map { row ->
             val id = row[schema.targets.id]
-            EnabledPatchTarget(id, row[schema.targets.apkmirrorUrl], row[schema.targets.packageName], attachmentsFor(schema, id))
+            EnabledPatchTarget(
+                id,
+                row[schema.targets.apkmirrorUrl],
+                row[schema.targets.apkpureUrl],
+                row[schema.targets.packageName],
+                attachmentsFor(schema, id),
+            )
         }
     }
 

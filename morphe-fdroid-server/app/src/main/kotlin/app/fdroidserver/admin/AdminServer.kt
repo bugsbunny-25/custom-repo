@@ -17,6 +17,8 @@ import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.engine.applicationEnvironment
+import io.ktor.server.engine.connector
 import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
@@ -68,7 +70,24 @@ class AdminServer(
     private var engine: EmbeddedServer<out ApplicationEngine, out ApplicationEngine.Configuration>? = null
 
     fun start() {
-        engine = embeddedServer(Netty, port = port, host = host) {
+        engine = embeddedServer(
+            Netty,
+            environment = applicationEnvironment { },
+            configure = {
+                // ktor 3.5 dropped the port/host + configure overload, so the
+                // listener is declared as an explicit connector here instead.
+                connector {
+                    port = this@AdminServer.port
+                    host = this@AdminServer.host
+                }
+                // Low-traffic admin UI + JSON API - default Netty engine
+                // sizing (worker/call groups scaled off availableProcessors())
+                // is overkill and wastes idle thread-stack memory.
+                workerGroupSize = 1
+                callGroupSize = 2
+                connectionGroupSize = 1
+            },
+        ) {
             configureServer()
         }.start(wait = false)
     }

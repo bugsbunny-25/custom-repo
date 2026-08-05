@@ -1,6 +1,7 @@
 package app.fdroidserver.admin
 
 import app.fdroidserver.apkmirror.ApkMirrorClient
+import app.fdroidserver.apkpure.ApkPureClient
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.config.AppDatabase
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
@@ -45,13 +46,13 @@ class AdminServerTest {
         val fdroidRepoManager = FdroidRepoManager()
         val tmpDir = File(tempDir, "tmp").apply { mkdirs() }
         val patchScheduler = PatchScheduler(
-            appConfig, ApkMirrorClient(), PatchLibrary(), BundleMerger(), PatchApplier(),
+            appConfig, ApkMirrorClient(), ApkPureClient(), PatchLibrary(), BundleMerger(), PatchApplier(),
             patchesDir, patchedRepoDir, tmpDir, fdroidRepoManager,
             PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-keystore.jks")),
             schema = AppConfig.PatchSchemas.Mobile,
         )
         val patchSchedulerTv = PatchScheduler(
-            appConfig, ApkMirrorClient(), PatchLibrary(), BundleMerger(), PatchApplier(),
+            appConfig, ApkMirrorClient(), ApkPureClient(), PatchLibrary(), BundleMerger(), PatchApplier(),
             patchesTvDir, patchedTvRepoDir, tmpDir, fdroidRepoManager,
             PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-tv-keystore.jks")),
             schema = AppConfig.PatchSchemas.Tv,
