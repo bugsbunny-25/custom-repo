@@ -299,6 +299,11 @@ class AppConfig(private val db: AppDatabase) {
         val file: String,
         val version: String,
         val updatedAt: String,
+        // Blank githubRepo means this entry is manually managed (uploaded
+        // .mpp files); a non-blank "owner/repo" opts it into
+        // PatchLibraryGithubScheduler's automatic download/import instead.
+        val githubRepo: String = "",
+        val githubIncludePrereleases: Boolean = false,
     )
 
     @Serializable
@@ -308,6 +313,10 @@ class AppConfig(private val db: AppDatabase) {
         val version: String = "",
         val filename: String? = null,
         val contentBase64: String? = null,
+        // Nullable (rather than defaulting to ""/false) so PUT can
+        // distinguish "not provided, don't change" from "explicitly cleared".
+        val githubRepo: String? = null,
+        val githubIncludePrereleases: Boolean? = null,
     )
 
     private fun patchLibraryRowToView(schema: PatchSchema, row: org.jetbrains.exposed.sql.ResultRow): PatchLibraryEntryView =
@@ -317,26 +326,38 @@ class AppConfig(private val db: AppDatabase) {
             file = row[schema.library.file],
             version = row[schema.library.version],
             updatedAt = row[schema.library.updatedAt],
+            githubRepo = row[schema.library.githubRepo],
+            githubIncludePrereleases = row[schema.library.githubIncludePrereleases],
         )
 
     suspend fun listPatchLibrary(schema: PatchSchema): List<PatchLibraryEntryView> = db.tx {
         schema.library.selectAll().map { patchLibraryRowToView(schema, it) }
     }
 
-    suspend fun addPatchToLibrary(schema: PatchSchema, id: String, name: String, fileName: String): Result<PatchLibraryEntryView> = db.tx {
+    suspend fun addPatchToLibrary(
+        schema: PatchSchema,
+        id: String,
+        name: String,
+        fileName: String,
+        githubRepo: String = "",
+        githubIncludePrereleases: Boolean = false,
+    ): Result<PatchLibraryEntryView> = db.tx {
         if (!isValidSlug(id)) return@tx Result.Error("A valid id (letters, numbers, - and _ only) is required")
         if (schema.library.selectAll().where { schema.library.id eq id }.any()) {
             return@tx Result.Error("A patch with id \"$id\" already exists")
         }
         val updatedAt = now()
+        val repo = githubRepo.trim()
         schema.library.insert {
             it[schema.library.id] = id
             it[schema.library.name] = name.ifBlank { id }
             it[file] = fileName
             it[version] = ""
+            it[schema.library.githubRepo] = repo
+            it[schema.library.githubIncludePrereleases] = githubIncludePrereleases
             it[schema.library.updatedAt] = updatedAt
         }
-        Result.Ok(PatchLibraryEntryView(id, name.ifBlank { id }, fileName, "", updatedAt))
+        Result.Ok(PatchLibraryEntryView(id, name.ifBlank { id }, fileName, "", updatedAt, repo, githubIncludePrereleases))
     }
 
     data class PatchLibraryUpdateResult(val entry: PatchLibraryEntryView, val contentUpdated: Boolean)
@@ -347,6 +368,8 @@ class AppConfig(private val db: AppDatabase) {
         newName: String?,
         newVersion: String?,
         newFileName: String?,
+        newGithubRepo: String? = null,
+        newGithubIncludePrereleases: Boolean? = null,
     ): Result<PatchLibraryUpdateResult> = db.tx {
         val existing = schema.library.selectAll().where { schema.library.id eq id }.singleOrNull()
             ?: return@tx Result.Error("Patch not found")
@@ -356,10 +379,62 @@ class AppConfig(private val db: AppDatabase) {
             if (newName != null) it[name] = newName.ifBlank { id }
             if (newVersion != null) it[version] = newVersion
             if (newFileName != null) it[file] = newFileName
+            if (newGithubRepo != null) it[githubRepo] = newGithubRepo.trim()
+            if (newGithubIncludePrereleases != null) it[githubIncludePrereleases] = newGithubIncludePrereleases
             it[updatedAt] = now()
         }
         val updatedRow = schema.library.selectAll().where { schema.library.id eq id }.single()
         Result.Ok(PatchLibraryUpdateResult(patchLibraryRowToView(schema, updatedRow), contentUpdated))
+    }
+
+    /** Entries opted into [app.fdroidserver.patching.PatchLibraryGithubScheduler]'s
+     * automatic download (non-blank `github_repo`). */
+    data class PatchLibraryGithubEntry(
+        val id: String,
+        val githubRepo: String,
+        val githubIncludePrereleases: Boolean,
+        val githubLastReleaseId: String,
+    )
+
+    suspend fun listPatchLibraryWithGithubRepo(schema: PatchSchema): List<PatchLibraryGithubEntry> = db.tx {
+        schema.library.selectAll().mapNotNull { row ->
+            val repo = row[schema.library.githubRepo]
+            if (repo.isBlank()) return@mapNotNull null
+            PatchLibraryGithubEntry(
+                id = row[schema.library.id],
+                githubRepo = repo,
+                githubIncludePrereleases = row[schema.library.githubIncludePrereleases],
+                githubLastReleaseId = row[schema.library.githubLastReleaseId],
+            )
+        }
+    }
+
+    /** Records a successful automatic `.mpp` download/import from GitHub for
+     * [id] - the auto-update counterpart to [updatePatchInLibrary], called by
+     * [app.fdroidserver.patching.PatchLibraryGithubScheduler] after it
+     * downloads a new release's `.mpp` asset. Always treated as a content
+     * update (unlike [updatePatchInLibrary], which only resets
+     * customizations/cache when a new file was actually uploaded) - the
+     * caller is expected to follow up with [resetPatchCustomizations] and
+     * [invalidatePatchCache], same as a manual file update via the admin UI. */
+    suspend fun recordPatchLibraryGithubUpdate(
+        schema: PatchSchema,
+        id: String,
+        version: String,
+        fileName: String,
+        releaseId: String,
+    ): Result<PatchLibraryEntryView> = db.tx {
+        if (schema.library.selectAll().where { schema.library.id eq id }.empty()) {
+            return@tx Result.Error("Patch not found")
+        }
+        schema.library.update({ schema.library.id eq id }) {
+            it[file] = fileName
+            it[schema.library.version] = version
+            it[githubLastReleaseId] = releaseId
+            it[updatedAt] = now()
+        }
+        val updatedRow = schema.library.selectAll().where { schema.library.id eq id }.single()
+        Result.Ok(patchLibraryRowToView(schema, updatedRow))
     }
 
     data class PatchDeleteResult(val id: String, val storedFile: String?, val detachedFrom: Int)

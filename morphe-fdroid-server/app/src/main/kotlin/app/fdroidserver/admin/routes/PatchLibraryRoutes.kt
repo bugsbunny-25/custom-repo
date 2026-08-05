@@ -2,6 +2,7 @@ package app.fdroidserver.admin.routes
 
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.patching.PatchLibrary
+import app.fdroidserver.patching.PatchLibraryGithubScheduler
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.request.receive
@@ -24,16 +25,25 @@ data class PatchOkResponse(val ok: Boolean = true, val patch: AppConfig.PatchLib
 @Serializable
 data class InspectResponse(val patchId: String, val patches: List<PatchLibrary.PatchInfo>)
 
+@Serializable
+data class GithubCheckResponse(val ok: Boolean = true, val updated: Boolean)
+
 /** The Patching tab's "Patch Library" API - upload/update/delete `.mpp`
  * files and introspect them, matching the Python version's
  * `/api/patch-library*` routes exactly. Registered twice (once per
  * [AppConfig.PatchSchema]) with distinct [basePath]s so the "Patching" and
- * "Patched TV" tabs get fully independent libraries. */
+ * "Patched TV" tabs get fully independent libraries.
+ *
+ * A library entry no longer strictly needs an uploaded `.mpp`: if
+ * `github_repo` is set (with no file yet), [patchLibraryGithubScheduler]'s
+ * scheduled sweep (or the "Check GitHub now" button, via this route's
+ * `/{id}/check-github`) downloads it from that repo's releases instead. */
 fun Route.patchLibraryRoutes(
     appConfig: AppConfig,
     patchLibrary: PatchLibrary,
     patchesDir: File,
     schema: AppConfig.PatchSchema,
+    patchLibraryGithubScheduler: PatchLibraryGithubScheduler,
     basePath: String = "/api/patch-library",
 ) {
     get(basePath) {
@@ -48,25 +58,41 @@ fun Route.patchLibraryRoutes(
         }
         val filename = payload.filename
         val contentBase64 = payload.contentBase64
-        if (filename.isNullOrBlank() || contentBase64.isNullOrBlank()) {
-            call.respond(HttpStatusCode.BadRequest, ErrorResponse("A .mpp file is required"))
+        val githubRepo = payload.githubRepo?.trim().orEmpty()
+        val hasUploadedFile = !filename.isNullOrBlank() && !contentBase64.isNullOrBlank()
+        // Either an uploaded .mpp or a github_repo to auto-download one from
+        // is required - but not both; a github_repo-only entry starts out
+        // with no file on disk until the next scheduled (or manually
+        // triggered) GitHub check imports one.
+        if (!hasUploadedFile && githubRepo.isBlank()) {
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("A .mpp file or a GitHub repo is required"))
             return@post
         }
 
         val storedName = "${payload.id}.mpp"
-        val bytes = try {
-            Base64.getDecoder().decode(contentBase64)
-        } catch (e: IllegalArgumentException) {
-            call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid base64 content"))
-            return@post
+        val bytes = if (hasUploadedFile) {
+            try {
+                Base64.getDecoder().decode(contentBase64)
+            } catch (e: IllegalArgumentException) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid base64 content"))
+                return@post
+            }
+        } else {
+            null
         }
 
-        val result = appConfig.addPatchToLibrary(schema, payload.id, payload.name, storedName)
+        val result = appConfig.addPatchToLibrary(
+            schema, payload.id, payload.name, storedName,
+            githubRepo = githubRepo,
+            githubIncludePrereleases = payload.githubIncludePrereleases ?: false,
+        )
         when (result) {
             is AppConfig.Result.Error -> call.respond(HttpStatusCode.BadRequest, ErrorResponse(result.message))
             is AppConfig.Result.Ok -> {
-                patchesDir.mkdirs()
-                File(patchesDir, storedName).writeBytes(bytes)
+                if (bytes != null) {
+                    patchesDir.mkdirs()
+                    File(patchesDir, storedName).writeBytes(bytes)
+                }
                 call.respond(HttpStatusCode.Created, PatchOkResponse(patch = result.value))
             }
         }
@@ -92,7 +118,11 @@ fun Route.patchLibraryRoutes(
 
         val existing = appConfig.listPatchLibrary(schema).firstOrNull { it.id == id }
         val newFileName = if (bytesToWrite != null) (existing?.file?.ifBlank { "$id.mpp" } ?: "$id.mpp") else null
-        val updateResult = appConfig.updatePatchInLibrary(schema, id, payload.name, payload.version, newFileName)
+        val updateResult = appConfig.updatePatchInLibrary(
+            schema, id, payload.name, payload.version, newFileName,
+            newGithubRepo = payload.githubRepo,
+            newGithubIncludePrereleases = payload.githubIncludePrereleases,
+        )
         if (updateResult is AppConfig.Result.Ok && updateResult.value.contentUpdated) {
             appConfig.resetPatchCustomizations(schema, id)
             appConfig.invalidatePatchCache(schema, id)
@@ -126,6 +156,20 @@ fun Route.patchLibraryRoutes(
                 call.respond(DeletedResponse(deleted = mapOf("id" to id)))
             }
         }
+    }
+
+    // "Check GitHub now" button - runs the same auto-update check as the
+    // scheduled background sweep, synchronously, for one entry - only
+    // meaningful for entries with a github_repo configured (returns
+    // updated=false for anything else, same as "no newer release found").
+    post("$basePath/{id}/check-github") {
+        val id = call.parameters["id"]
+        if (id == null) {
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid patch id"))
+            return@post
+        }
+        val updated = patchLibraryGithubScheduler.checkEntryNow(id)
+        call.respond(GithubCheckResponse(updated = updated))
     }
 
     get("$basePath/{id}/inspect") {

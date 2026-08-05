@@ -11,6 +11,7 @@ import app.fdroidserver.github.GithubScheduler
 import app.fdroidserver.patching.BundleMerger
 import app.fdroidserver.patching.PatchApplier
 import app.fdroidserver.patching.PatchLibrary
+import app.fdroidserver.patching.PatchLibraryGithubScheduler
 import app.fdroidserver.patching.PatchScheduler
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -78,9 +79,24 @@ fun main() {
         schema = AppConfig.PatchSchemas.Tv,
     )
 
+    // Created up front (rather than gated behind the "setup complete" wait
+    // below, like githubScheduler is) since AdminServer's routes - including
+    // the Patch Library's "Check GitHub now" button - need a
+    // PatchLibraryGithubScheduler instance to register at startup. The
+    // scheduled background checks (in the loops below) still don't run
+    // until setup completes, same as every other scheduler. githubToken is
+    // snapshotted once here, same as the existing githubScheduler already
+    // did (a token changed later via Settings takes effect on the next
+    // restart, not immediately - not new behavior introduced here).
+    val githubHttpClient = HttpClient(CIO)
+    val initialGithubToken = runBlocking { appConfig.getSettings() }.githubToken.ifBlank { null }
+    val releaseChecker = GitHubReleaseChecker(githubHttpClient, initialGithubToken)
+    val patchLibraryGithubScheduler = PatchLibraryGithubScheduler(appConfig, releaseChecker, patchesDir, AppConfig.PatchSchemas.Mobile)
+    val patchLibraryGithubSchedulerTv = PatchLibraryGithubScheduler(appConfig, releaseChecker, patchesTvDir, AppConfig.PatchSchemas.Tv)
+
     val adminServer = AdminServer(
-        appConfig, patchLibrary, patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler,
-        patchesTvDir, patchedTvRepoDir, patchSchedulerTv,
+        appConfig, patchLibrary, patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler, patchLibraryGithubScheduler,
+        patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchLibraryGithubSchedulerTv,
     )
     adminServer.start()
     logger.info("Admin server started on :5001")
@@ -163,9 +179,7 @@ fun main() {
             logger.info("Setup complete - starting scheduler loops")
 
             val settings = appConfig.getSettings()
-            val githubHttpClient = HttpClient(CIO)
             try {
-                val releaseChecker = GitHubReleaseChecker(githubHttpClient, settings.githubToken.ifBlank { null })
                 val githubScheduler = GithubScheduler(appConfig, releaseChecker, repoDir, fdroidRepoManager)
 
                 val githubInterval = settings.updateInterval.seconds
@@ -180,6 +194,11 @@ fun main() {
                 }
                 val patchJob = launch {
                     while (true) {
+                        // Checked right before patchScheduler so a freshly
+                        // auto-imported .mpp is used the same cycle it's
+                        // downloaded in, not the next one.
+                        runCatching { patchLibraryGithubScheduler.checkForUpdates() }
+                            .onFailure { logger.error("Patch library GitHub scheduler error: $it") }
                         runCatching { patchScheduler.checkForUpdates() }
                             .onFailure { logger.error("Patch scheduler error: $it") }
                         delay(patchInterval)
@@ -187,6 +206,8 @@ fun main() {
                 }
                 val patchTvJob = launch {
                     while (true) {
+                        runCatching { patchLibraryGithubSchedulerTv.checkForUpdates() }
+                            .onFailure { logger.error("Patch library GitHub scheduler (TV) error: $it") }
                         runCatching { patchSchedulerTv.checkForUpdates() }
                             .onFailure { logger.error("Patch TV scheduler error: $it") }
                         delay(patchInterval)

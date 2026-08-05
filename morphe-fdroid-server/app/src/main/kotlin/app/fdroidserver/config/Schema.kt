@@ -75,13 +75,27 @@ object GithubCheckedReleases : Table("github_checked_releases") {
 
 /** Reusable library of uploaded `.mpp` patch files. Base class so the
  * "Patched" and "Patched TV" tabs (see [PatchSchema]) each get their own
- * table/data with zero duplicated column definitions. */
+ * table/data with zero duplicated column definitions.
+ *
+ * `github_repo` (owner/repo, blank = disabled) lets a library entry's
+ * `.mpp` be kept up to date automatically instead of manually uploaded:
+ * [app.fdroidserver.patching.PatchLibraryGithubScheduler] polls that repo's
+ * releases for a new `.mpp` asset and downloads/imports it in place of a
+ * manual upload. `github_include_prereleases` mirrors [GithubRepos]'
+ * per-repo override of the same name. `github_last_release_id` is the last
+ * release id that was actually imported, so a release that's already been
+ * imported isn't re-downloaded every poll (added after the others, so
+ * existing databases pick it up via `createMissingTablesAndColumns`'s ALTER
+ * TABLE). */
 open class PatchLibrarySchema(name: String) : Table(name) {
     val id = varchar("id", 255)
     val name = varchar("name", 255).default("")
     val file = varchar("file", 255).default("")
     val version = varchar("version", 64).default("")
     val updatedAt = varchar("updated_at", 64).default("")
+    val githubRepo = varchar("github_repo", 255).default("")
+    val githubIncludePrereleases = bool("github_include_prereleases").default(false)
+    val githubLastReleaseId = varchar("github_last_release_id", 128).default("")
 
     override val primaryKey = PrimaryKey(id)
 }
