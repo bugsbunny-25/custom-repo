@@ -5,7 +5,16 @@ services:
     image: ghcr.io/bugsbunny-25/custom-repo:main
     container_name: fdroid-repo
     restart: unless-stopped
-    
+
+    # Backstop for the JVM's memory footprint. Without a limit the JVM sizes
+    # its heap at 25% of *host* RAM (~2GB idle on a large host); the limit
+    # both caps the container and lets UseContainerSupport size sanely even if
+    # the -Xmx in supervisord.conf is ever dropped. Sized above -Xmx512m to
+    # leave room for the JVM's native/off-heap floor plus nginx + the
+    # short-lived fdroid/python and patch-sign work.
+    mem_limit: 768m
+
+
     volumes:
       # Persist the F-Droid repository data
       - ${CONFIG_FOLDER}/fdroid-data/:/srv/fdroid
