@@ -1,15 +1,22 @@
 [versions]
-kotlin = "2.4.0"
-ktor = "3.5.0"
+kotlin = "2.4.10"
+ktor = "3.5.2"
 kotlinx-serialization = "1.11.0"
 kotlinx-coroutines = "1.11.0"
 snakeyaml = "2.6"
+# Held together with Exposed as a coupled pair: sqlite-jdbc 3.48+ bundles a
+# stricter SQLite engine that rejects the table-constraint DDL Exposed 0.61
+# emits ("near PRIMARY: syntax error" on CREATE TABLE). Bump both at once -
+# sqlite-jdbc to latest and Exposed to 1.x (which needs the org.jetbrains
+# .exposed.v1.* package migration) - not one without the other.
 sqlite-jdbc = "3.47.1.0"
 exposed = "0.61.0"
-jsoup = "1.22.2"
-logback = "1.5.37"
+jsoup = "1.23.1"
+# Held on the 1.5.x line: logback 1.6.x pairs with slf4j 2.1.x, which is still
+# only pre-release - bump together once slf4j 2.1 goes stable.
+logback = "1.5.38"
 slf4j = "2.0.18"
-junit = "6.1.1"
+junit = "6.1.2"
 mockk = "1.14.11"
 # Pinned to the exact version morphe-cli v1.9.1 itself depends on (confirmed
 # via its gradle/libs.versions.toml at that tag) - this is a dev/pre-release
@@ -19,7 +26,7 @@ mockk = "1.14.11"
 # Patch/Option API surface, per plan.md §5.1/§9.3.
 morphe-patcher = "1.6.0-dev.1"
 arsclib = "1.4.0"
-shadow = "9.4.3"
+shadow = "9.6.1"
 
 [libraries]
 arsclib = { module = "com.github.REAndroid:ARSCLib", version.ref = "arsclib" }
