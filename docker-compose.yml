@@ -6,14 +6,15 @@ services:
     container_name: fdroid-repo
     restart: unless-stopped
 
-    # Backstop for the JVM's memory footprint. Without a limit the JVM sizes
-    # its heap at 25% of *host* RAM (~2GB idle on a large host); the limit
-    # both caps the container and lets UseContainerSupport size sanely even if
-    # the -Xmx in supervisord.conf is ever dropped. Sized above -Xmx512m to
-    # leave room for the JVM's native/off-heap floor plus nginx + the
-    # short-lived fdroid/python and patch-sign work.
-    mem_limit: 768m
-
+    # No container-wide mem_limit: the admin-server JVM caps its own heap via
+    # -Xmx512m in supervisord.conf, so it doesn't need a cgroup backstop to
+    # stay small. The APK patch/sign pipeline runs in a separate short-lived
+    # JVM per job (spawned by PatchWorkerLauncher, no -Xmx of its own) that
+    # needs however much memory a given APK's patch run takes - a container
+    # limit here would just recreate the same OOM risk one level up. If you
+    # want a hard ceiling on total container RAM, set mem_limit here based on
+    # your host's headroom (a patch run's peak usage depends on APK size and
+    # the patches applied - profile a real run rather than guessing).
 
     volumes:
       # Persist the F-Droid repository data
