@@ -41,15 +41,23 @@ object PatchSelector {
     }
 
     /**
-     * A patch with no `compatibility` list, or with any entry whose
-     * `packageName` is null, is universal (applies to every app). Otherwise
-     * it only applies to the packages explicitly listed - a .mpp file
-     * commonly bundles patches for several unrelated apps, so without this
-     * check every default-enabled patch in the file (regardless of which
-     * app it targets) would get applied to whatever APK we're patching.
+     * A patch with no `compatibility` list (null), an empty `compatibility`
+     * list, or any entry whose `packageName` is null, is universal (applies
+     * to every app). Otherwise it only applies to the packages explicitly
+     * listed - a .mpp file commonly bundles patches for several unrelated
+     * apps, so without this check every default-enabled patch in the file
+     * (regardless of which app it targets) would get applied to whatever APK
+     * we're patching.
+     *
+     * Treating an empty list as universal mirrors the fix in morphe-desktop
+     * PR #207 ("Allow patches with empty targets to apply automatically"),
+     * which addressed a regression where patches declared with
+     * `compatibility = listOf()` were silently excluded because
+     * `emptyList.any { ... }` is always false.
      */
     private fun isCompatibleWithPackage(patch: Patch<*>, packageName: String): Boolean {
         val compatibility = patch.compatibility ?: return true
+        if (compatibility.isEmpty()) return true
         return compatibility.any { it.packageName == null || it.packageName == packageName }
     }
 

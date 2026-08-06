@@ -4,27 +4,33 @@ ktor = "3.5.2"
 kotlinx-serialization = "1.11.0"
 kotlinx-coroutines = "1.11.0"
 snakeyaml = "2.6"
-# Held together with Exposed as a coupled pair: sqlite-jdbc 3.48+ bundles a
-# stricter SQLite engine that rejects the table-constraint DDL Exposed 0.61
-# emits ("near PRIMARY: syntax error" on CREATE TABLE). Bump both at once -
-# sqlite-jdbc to latest and Exposed to 1.x (which needs the org.jetbrains
-# .exposed.v1.* package migration) - not one without the other.
-sqlite-jdbc = "3.47.1.0"
-exposed = "0.61.0"
+# Bumped together as a coupled pair (see original comment history):
+# Exposed 1.x introduces the org.jetbrains.exposed.v1.* package layout
+# (v1.core.* for table/column/expression types, v1.jdbc.* for Database,
+# SchemaUtils, transaction and the DML extension functions). All three
+# call-sites (AppConfig.kt, AppDatabase.kt, Schema.kt) were migrated in lock
+# step. sqlite-jdbc was also bumped to the current release at the same time.
+sqlite-jdbc = "3.53.2.0"
+exposed = "1.1.1"
 jsoup = "1.23.1"
-# Held on the 1.5.x line: logback 1.6.x pairs with slf4j 2.1.x, which is still
-# only pre-release - bump together once slf4j 2.1 goes stable.
-logback = "1.5.38"
+# logback 1.6.x is a drop-in replacement for 1.5.x and works with SLF4J 2.0.x
+# (the note about needing 2.1.x was incorrect - see logback.qos.ch/news.html).
+# Our logback.xml uses no Janino conditionals so no config migration is needed.
+logback = "1.6.1"
 slf4j = "2.0.18"
 junit = "6.1.2"
 mockk = "1.14.11"
-# Pinned to the exact version morphe-cli v1.9.1 itself depends on (confirmed
-# via its gradle/libs.versions.toml at that tag) - this is a dev/pre-release
-# build, not "latest stable", chosen deliberately for API parity with the
-# morphe-cli release this codebase was originally validated against. Bump
-# only after re-checking morphe-cli's currently pinned version and the real
-# Patch/Option API surface, per plan.md §5.1/§9.3.
-morphe-patcher = "1.6.0-dev.1"
+# Pinned to the exact version morphe-cli main currently depends on (confirmed
+# via its gradle/libs.versions.toml). 1.7.0 introduced PathOptionsKt (typed
+# option constructors: colorOption, filePathOption, filesOption, folderOption,
+# imageOption) plus new Option subclasses (ColorOption, FilePathOption,
+# FilesOption, FolderOption, ImageOption, StringOption, ImageSize). Patches
+# compiled against 1.7.0+ reference PathOptionsKt at class-init time, so the
+# server must bundle at least 1.7.0 or loading those .mpp files will throw
+# ClassNotFoundException: app.morphe.patcher.patch.PathOptionsKt.
+# Bump only after re-checking morphe-cli's currently pinned version and the
+# real Patch/Option API surface, per plan.md §5.1/§9.3.
+morphe-patcher = "1.7.0"
 arsclib = "1.4.0"
 shadow = "9.6.1"
 

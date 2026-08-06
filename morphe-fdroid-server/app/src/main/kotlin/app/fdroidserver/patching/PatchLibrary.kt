@@ -16,13 +16,18 @@ import java.io.File
  * directly gets typed data with none of that fragility.
  *
  * NOTE on API surface: coded against the `Patch`/`Option`/`Compatibility`
- * shape in morphe-patcher `1.6.0-dev.1` (the version pinned in
+ * shape in morphe-patcher `1.7.0` (the version pinned in
  * `gradle/libs.versions.toml`): `Patch.default` (default-enabled flag) and
  * `Patch.compatibility` (`List<Compatibility>?`, each with a nullable
  * `packageName` and a list of `AppTarget`s carrying the version string).
- * The older `Patch.use` / `Patch.compatiblePackages` / `Option.key` /
- * `Option.title` accessors this file used to read still exist but are
- * `@Deprecated`; when bumping the pinned version again, re-check whether
+ * 1.7.0 added typed `Option` subclasses (`ColorOption`, `FilePathOption`,
+ * `FilesOption`, `FolderOption`, `ImageOption`) under `PathOptionsKt`; this
+ * file only reads the base `Option` fields (`name`, `description`, `required`,
+ * `default`, `type`, `values`) which are still present and non-deprecated.
+ * `Option.title` was also added as a distinct UI-label field separate from
+ * `name` (the identifier); both `key` (old deprecated identifier) and `use`
+ * (old deprecated default flag) still exist as deprecated aliases.
+ * When bumping the pinned version again, re-check whether
  * `default`/`compatibility`/`name` are still the current shape.
  */
 class PatchLibrary {

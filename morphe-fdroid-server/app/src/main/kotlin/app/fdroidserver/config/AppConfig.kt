@@ -2,13 +2,14 @@ package app.fdroidserver.config
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.deleteWhere
-import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.update
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.or
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
+import org.jetbrains.exposed.v1.jdbc.insert
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.update
 import java.time.Instant
 
 /**
@@ -213,7 +214,8 @@ class AppConfig(private val db: AppDatabase) {
             GithubRepoView(
                 id = repoId,
                 repo = row[GithubRepos.repo],
-                includePrereleases = row[GithubRepos.includePrereleases] ?: settings[Settings.defaultIncludePrereleases],
+                includePrereleases = row[GithubRepos.includePrereleases]
+                    ?: settings[Settings.defaultIncludePrereleases],
                 includeDrafts = row[GithubRepos.includeDrafts] ?: settings[Settings.defaultIncludeDrafts],
                 maxReleases = row[GithubRepos.maxReleases] ?: settings[Settings.defaultMaxReleases],
                 enabled = enabled,
@@ -264,7 +266,7 @@ class AppConfig(private val db: AppDatabase) {
 
     suspend fun deleteCheckedEntry(repoId: Int, releaseId: String): Boolean = db.tx {
         val deleted = GithubCheckedReleases.deleteWhere {
-            SqlExpressionBuilder.run { (GithubCheckedReleases.repoId eq repoId) and (GithubCheckedReleases.releaseId eq releaseId) }
+            (GithubCheckedReleases.repoId eq repoId) and (GithubCheckedReleases.releaseId eq releaseId)
         }
         deleted > 0
     }
@@ -319,7 +321,10 @@ class AppConfig(private val db: AppDatabase) {
         val githubIncludePrereleases: Boolean? = null,
     )
 
-    private fun patchLibraryRowToView(schema: PatchSchema, row: org.jetbrains.exposed.sql.ResultRow): PatchLibraryEntryView =
+    private fun patchLibraryRowToView(
+        schema: PatchSchema,
+        row: org.jetbrains.exposed.v1.core.ResultRow
+    ): PatchLibraryEntryView =
         PatchLibraryEntryView(
             id = row[schema.library.id],
             name = row[schema.library.name],
@@ -357,7 +362,17 @@ class AppConfig(private val db: AppDatabase) {
             it[schema.library.githubIncludePrereleases] = githubIncludePrereleases
             it[schema.library.updatedAt] = updatedAt
         }
-        Result.Ok(PatchLibraryEntryView(id, name.ifBlank { id }, fileName, "", updatedAt, repo, githubIncludePrereleases))
+        Result.Ok(
+            PatchLibraryEntryView(
+                id,
+                name.ifBlank { id },
+                fileName,
+                "",
+                updatedAt,
+                repo,
+                githubIncludePrereleases
+            )
+        )
     }
 
     data class PatchLibraryUpdateResult(val entry: PatchLibraryEntryView, val contentUpdated: Boolean)
@@ -447,7 +462,7 @@ class AppConfig(private val db: AppDatabase) {
             ?: return@tx Result.Error("Patch not found")
         val storedFile = existing[schema.library.file]
         val detached = schema.attachments.selectAll().where { schema.attachments.patchId eq id }.count().toInt()
-        schema.library.deleteWhere { SqlExpressionBuilder.run { schema.library.id eq id } }
+        schema.library.deleteWhere { schema.library.id eq id }
         Result.Ok(PatchDeleteResult(id, storedFile.ifBlank { null }, detached))
     }
 
@@ -461,7 +476,7 @@ class AppConfig(private val db: AppDatabase) {
         var reset = 0
         for (row in rows) {
             val hadOverrides = row[schema.attachments.patchSelectionJson] != "{}" ||
-                row[schema.attachments.optionOverridesJson] != "{}"
+                    row[schema.attachments.optionOverridesJson] != "{}"
             if (hadOverrides) reset++
         }
         schema.attachments.update({ schema.attachments.patchId eq patchId }) {
@@ -476,7 +491,7 @@ class AppConfig(private val db: AppDatabase) {
      * content changes, so the next check re-patches with the new file
      * instead of skipping versions already processed with the old one. */
     suspend fun invalidatePatchCache(schema: PatchSchema, patchId: String): Int = db.tx {
-        schema.checkedEntries.deleteWhere { SqlExpressionBuilder.run { schema.checkedEntries.patchId eq patchId } }
+        schema.checkedEntries.deleteWhere { schema.checkedEntries.patchId eq patchId }
     }
 
     // ---------------------------------------------------------------------
@@ -606,7 +621,11 @@ class AppConfig(private val db: AppDatabase) {
         Result.Ok(payload)
     }
 
-    suspend fun updatePatchTarget(schema: PatchSchema, id: String, payload: PatchTargetPayload): Result<PatchTargetPayload> = db.tx {
+    suspend fun updatePatchTarget(
+        schema: PatchSchema,
+        id: String,
+        payload: PatchTargetPayload
+    ): Result<PatchTargetPayload> = db.tx {
         if (payload.apkmirrorUrl.isBlank()) return@tx Result.Error("APKMirror URL is required")
         val updated = schema.targets.update({ schema.targets.id eq id }) {
             it[name] = payload.name.ifBlank { id }
@@ -621,7 +640,7 @@ class AppConfig(private val db: AppDatabase) {
     /** Deleting a target cascades to its `patch_attachments` and
      * `patch_checked_entries` rows via `ON DELETE CASCADE`. */
     suspend fun deletePatchTarget(schema: PatchSchema, id: String): Result<String> = db.tx {
-        val deleted = schema.targets.deleteWhere { SqlExpressionBuilder.run { schema.targets.id eq id } }
+        val deleted = schema.targets.deleteWhere { schema.targets.id eq id }
         if (deleted == 0) Result.Error("Patch target not found") else Result.Ok(id)
     }
 
@@ -642,7 +661,11 @@ class AppConfig(private val db: AppDatabase) {
      * Patches" UI save just patch_selection/option_overrides without
      * clobbering supported_versions, and vice versa.
      */
-    suspend fun attachPatchToTarget(schema: PatchSchema, targetId: String, payload: AttachPayload): Result<PatchAttachmentView> = db.tx {
+    suspend fun attachPatchToTarget(
+        schema: PatchSchema,
+        targetId: String,
+        payload: AttachPayload
+    ): Result<PatchAttachmentView> = db.tx {
         if (!schema.targets.selectAll().where { schema.targets.id eq targetId }.any()) {
             return@tx Result.Error("Patch target not found")
         }
@@ -712,14 +735,14 @@ class AppConfig(private val db: AppDatabase) {
 
     suspend fun detachPatchFromTarget(schema: PatchSchema, targetId: String, patchId: String): Result<String> = db.tx {
         val deleted = schema.attachments.deleteWhere {
-            SqlExpressionBuilder.run { (schema.attachments.targetId eq targetId) and (schema.attachments.patchId eq patchId) }
+            (schema.attachments.targetId eq targetId) and (schema.attachments.patchId eq patchId)
         }
         if (deleted == 0) Result.Error("Attachment not found") else Result.Ok(patchId)
     }
 
     suspend fun deletePatchCheckedEntry(schema: PatchSchema, targetId: String, cacheKey: String): Boolean = db.tx {
         val deleted = schema.checkedEntries.deleteWhere {
-            SqlExpressionBuilder.run { (schema.checkedEntries.targetId eq targetId) and (schema.checkedEntries.cacheKey eq cacheKey) }
+            (schema.checkedEntries.targetId eq targetId) and (schema.checkedEntries.cacheKey eq cacheKey)
         }
         deleted > 0
     }
@@ -742,7 +765,8 @@ class AppConfig(private val db: AppDatabase) {
         GithubRepos.selectAll().where { GithubRepos.enabled eq true }.map { row ->
             EnabledGithubRepo(
                 repo = row[GithubRepos.repo],
-                includePrereleases = row[GithubRepos.includePrereleases] ?: settings[Settings.defaultIncludePrereleases],
+                includePrereleases = row[GithubRepos.includePrereleases]
+                    ?: settings[Settings.defaultIncludePrereleases],
                 includeDrafts = row[GithubRepos.includeDrafts] ?: settings[Settings.defaultIncludeDrafts],
                 maxReleases = row[GithubRepos.maxReleases] ?: settings[Settings.defaultMaxReleases],
                 apkPattern = row[GithubRepos.apkPattern] ?: settings[Settings.apkPattern],
@@ -770,7 +794,8 @@ class AppConfig(private val db: AppDatabase) {
      * transaction - the SQL replacement for `cacheStore.update { ... }` in
      * `GithubScheduler.checkRepo`. */
     suspend fun recordGithubOutcomes(repo: String, outcomes: List<GithubReleaseOutcome>) = db.tx {
-        val repoId = GithubRepos.selectAll().where { GithubRepos.repo eq repo }.singleOrNull()?.get(GithubRepos.id) ?: return@tx
+        val repoId =
+            GithubRepos.selectAll().where { GithubRepos.repo eq repo }.singleOrNull()?.get(GithubRepos.id) ?: return@tx
         val processedAt = now()
         for (outcome in outcomes) {
             GithubCheckedReleases.insert {
@@ -791,7 +816,9 @@ class AppConfig(private val db: AppDatabase) {
      * came from. */
     suspend fun releaseIdToRepoMap(): Map<String, String> = db.tx {
         val idToRepo = GithubRepos.selectAll().associate { it[GithubRepos.id] to it[GithubRepos.repo] }
-        GithubCheckedReleases.selectAll().associate { it[GithubCheckedReleases.releaseId] to (idToRepo[it[GithubCheckedReleases.repoId]] ?: "unknown-app") }
+        GithubCheckedReleases.selectAll().associate {
+            it[GithubCheckedReleases.releaseId] to (idToRepo[it[GithubCheckedReleases.repoId]] ?: "unknown-app")
+        }
     }
 
     data class EnabledPatchTarget(

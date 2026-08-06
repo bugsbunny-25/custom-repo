@@ -23,9 +23,8 @@ import java.io.File
  * against the real CLI, only guessed).
  *
  * Constructor signature for [PatcherConfig] and the signing details below
- * were confirmed directly against morphe-patcher `1.5.2-dev.2` (the exact
- * version this project depends on - see `gradle/libs.versions.toml`), not
- * guessed.
+ * were confirmed directly against morphe-patcher `1.7.0` (the version pinned
+ * in `gradle/libs.versions.toml`) - not guessed.
  */
 class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApplier::class.java.name)) {
 
@@ -101,7 +100,12 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
                     workingCopy,
                     outputApk,
                     signing.signerName,
-                    ApkUtils.KeyStoreDetails(signing.keystoreFile, signing.keystorePassword, signing.keyAlias, signing.keyPassword),
+                    ApkUtils.KeyStoreDetails(
+                        signing.keystoreFile,
+                        signing.keystorePassword,
+                        signing.keyAlias,
+                        signing.keyPassword
+                    ),
                 )
 
                 ApplyResult.Success(packageName, versionName)

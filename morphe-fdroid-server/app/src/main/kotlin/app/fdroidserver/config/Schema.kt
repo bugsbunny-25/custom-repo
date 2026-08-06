@@ -1,7 +1,7 @@
 package app.fdroidserver.config
 
-import org.jetbrains.exposed.sql.ReferenceOption
-import org.jetbrains.exposed.sql.Table
+import org.jetbrains.exposed.v1.core.ReferenceOption
+import org.jetbrains.exposed.v1.core.Table
 
 /**
  * SQLite schema, replacing the old `config.yml` (via [ConfigStore]) /
@@ -99,6 +99,7 @@ open class PatchLibrarySchema(name: String) : Table(name) {
 
     override val primaryKey = PrimaryKey(id)
 }
+
 object PatchLibraryTable : PatchLibrarySchema("patch_library")
 object PatchLibraryTableTv : PatchLibrarySchema("patch_library_tv")
 
@@ -108,6 +109,7 @@ open class PatchTargetsSchema(name: String) : Table(name) {
     val id = varchar("id", 255)
     val name = varchar("name", 255).default("")
     val apkmirrorUrl = varchar("apkmirror_url", 512).default("")
+
     // Optional fallback source, checked when a pinned version isn't found on
     // APKMirror. Blank = no fallback. Added after apkmirror_url, so existing
     // databases pick it up via createMissingTablesAndColumns' ALTER TABLE.
@@ -117,6 +119,7 @@ open class PatchTargetsSchema(name: String) : Table(name) {
 
     override val primaryKey = PrimaryKey(id)
 }
+
 object PatchTargets : PatchTargetsSchema("patch_targets")
 object PatchTargetsTv : PatchTargetsSchema("patch_targets_tv")
 
@@ -145,6 +148,7 @@ open class PatchAttachmentsSchema(
         uniqueIndex(targetId, patchId)
     }
 }
+
 object PatchAttachments : PatchAttachmentsSchema("patch_attachments", PatchTargets, PatchLibraryTable)
 object PatchAttachmentsTv : PatchAttachmentsSchema("patch_attachments_tv", PatchTargetsTv, PatchLibraryTableTv)
 
@@ -166,5 +170,6 @@ open class PatchCheckedEntriesSchema(name: String, targets: PatchTargetsSchema) 
         uniqueIndex(targetId, cacheKey)
     }
 }
+
 object PatchCheckedEntries : PatchCheckedEntriesSchema("patch_checked_entries", PatchTargets)
 object PatchCheckedEntriesTv : PatchCheckedEntriesSchema("patch_checked_entries_tv", PatchTargetsTv)
