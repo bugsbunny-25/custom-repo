@@ -4,6 +4,8 @@ import app.fdroidserver.scraper.ScraperClient
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.jsoup.Jsoup
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -190,6 +192,21 @@ class ApkPureClientTest {
         return server
     }
 
+    // Faked FlareSolverr sidecar - see ApkMirrorClientTest's copy of this
+    // helper for the fuller comment on why it's a second throwaway HttpServer
+    // rather than a mock HTTP client.
+    private fun startFlareSolverrServer(responseJson: (requestBody: String) -> String): HttpServer {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/v1") { exchange ->
+            val requestBody = exchange.requestBody.bufferedReader().readText()
+            val bytes = responseJson(requestBody).toByteArray()
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        return server
+    }
+
     @Test
     fun `warms up with the app page and reads versions from the versions page`() {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -217,16 +234,19 @@ class ApkPureClientTest {
     }
 
     @Test
-    fun `retries past a transient Cloudflare challenge on the versions page`() {
-        val server = startVersionsServer(
-            versions = listOf(FakeResponse(200, cloudflareChallengeBody), FakeResponse(200, versionsHtml)),
-        )
+    fun `falls back to FlareSolverr on the very first Cloudflare challenge on the versions page`() {
+        // MAX_FETCH_ATTEMPTS is 1 - get() no longer retries a challenge
+        // in-process at all, so a transient challenge is only ever cleared
+        // via the FlareSolverr fallback, on the first attempt.
+        val flareSolverr = startFlareSolverrServer { Json.encodeToString(versionsHtml).let { """{"status":"ok","solution":{"response":$it,"cookies":[]}}""" } }
+        val server = startVersionsServer(versions = listOf(FakeResponse(200, cloudflareChallengeBody)))
         try {
             val appUrl = "http://127.0.0.1:${server.address.port}/flightaware/com.flightaware"
-            val versions = ApkPureClient().getVersions(appUrl)
+            val versions = ApkPureClient(flareSolverrUrl = "http://127.0.0.1:${flareSolverr.address.port}/v1").getVersions(appUrl)
             assertEquals("5.15.4", versions.single().version)
         } finally {
             server.stop(0)
+            flareSolverr.stop(0)
         }
     }
 

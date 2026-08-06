@@ -13,10 +13,14 @@ import org.slf4j.LoggerFactory
  * Orchestrates the whole patching pipeline: for each enabled patch target
  * (an app), check APKMirror for a new version matching one of its attached
  * library patches - falling back to APKPure for versions APKMirror doesn't
- * list, when the target has an APKPure URL configured - download (and merge,
- * if it's a bundle) the APK, apply the patch via [PatchApplier], and publish
- * the result into the patched F-Droid repo - keeping only the newest 3
- * versions per (app, patch) pair.
+ * list, when the target has an APKPure URL configured - then hand the
+ * version page URL + patch config off to [PatchWorkerLauncher], which
+ * downloads, merges (if it's a bundle), patches, and signs the APK in a
+ * separate short-lived JVM, and publish the result into the patched F-Droid
+ * repo - keeping only the newest 3 versions per (app, patch) pair. This class
+ * itself never downloads or opens an APK - only version-list scraping
+ * (`apkMirrorClient.getVersions`/`apkPureClient.getVersions`, lightweight
+ * HTML parsing) and DB/orchestration work run in the admin-server process.
  *
  * Direct Kotlin port of the orchestration in the old Python
  * `patch_checker.py`'s `check_for_updates()`. The output filename no longer
@@ -31,7 +35,6 @@ class PatchScheduler(
     private val apkMirrorClient: ApkMirrorClient,
     private val apkPureClient: ApkPureClient,
     private val patchLibrary: PatchLibrary,
-    private val bundleMerger: BundleMerger,
     private val patchWorkerLauncher: PatchWorkerLauncher,
     private val patchesDir: File,
     private val patchedRepoDir: File,
@@ -41,6 +44,10 @@ class PatchScheduler(
     private val schema: AppConfig.PatchSchema = AppConfig.PatchSchemas.Mobile,
     private val logger: Logger = LoggerFactory.getLogger(PatchScheduler::class.java.name),
 ) {
+    /** Set by [refreshFlareSolverrUrl] and handed to each worker request -
+     * the worker builds its own [ApkMirrorClient]/[ApkPureClient] instances
+     * in a fresh process, so it can't share this process's client objects. */
+    private var flareSolverrUrl: String? = null
     suspend fun checkForUpdates(): Boolean {
         refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById(schema)
@@ -68,14 +75,12 @@ class PatchScheduler(
         val url = appConfig.getSettings().flareSolverrUrl
         apkMirrorClient.flareSolverrUrl = url
         apkPureClient.flareSolverrUrl = url
+        flareSolverrUrl = url
     }
 
     /** Which source a candidate version (and its download page) came from, so
-     * [prepareApk] resolves/downloads it through the right client. */
+     * the patch worker resolves/downloads it through the right client. */
     private enum class Source { APKMIRROR, APKPURE }
-
-    private fun clientFor(source: Source): ScraperClient =
-        if (source == Source.APKPURE) apkPureClient else apkMirrorClient
 
     /** APKPure download/app URLs live under apkpure.com (and its download
      * CDNs); anything else is treated as APKMirror. Used by
@@ -128,22 +133,21 @@ class PatchScheduler(
             return false
         }
 
-        var updated = false
-        var preparedApk: File? = null
-        try {
-            preparedApk = prepareApk(target.id, version, versionPageUrl, sourceForUrl(versionPageUrl))
-            if (preparedApk == null) return false
+        val source = sourceForUrl(versionPageUrl)
+        val preparedApkPath = File(tmpDir, "${target.id}-$version-prepared.apk")
 
+        var updated = false
+        try {
             for (attachment in target.patches) {
                 val libEntry = library[attachment.patchId]
                 if (libEntry == null) {
                     logger.warn("${target.id}: attached patch '${attachment.patchId}' not found in library, skipping")
                     continue
                 }
-                if (applyPatchToVersion(target, attachment, libEntry, version, preparedApk)) updated = true
+                if (applyPatchToVersion(target, attachment, libEntry, version, versionPageUrl, source, preparedApkPath)) updated = true
             }
         } finally {
-            preparedApk?.delete()
+            preparedApkPath.delete()
         }
 
         if (updated) publishUpdates()
@@ -183,7 +187,7 @@ class PatchScheduler(
     }
 
     /** A candidate version paired with the source that will resolve/download
-     * it (see [prepareApk]). */
+     * it (in the patch worker - see [applyPatchToVersion]). */
     private data class SourcedCandidate(val entry: ScraperClient.VersionEntry, val source: Source)
 
     private suspend fun checkTarget(
@@ -192,7 +196,13 @@ class PatchScheduler(
         apkmirrorVersions: List<ScraperClient.VersionEntry>,
     ): Boolean {
         var updated = false
-        val downloadedApks = mutableMapOf<String, File>() // version -> prepared (possibly merged) apk
+        // Stable per-version prepared-APK paths so multiple patch attachments
+        // matching the same version share one download+merge (done by the
+        // first worker invocation for that version; later ones for the same
+        // version see the file already exists and skip straight to patching -
+        // see PatchWorkerEntryPoint.runJob). Cleaned up once per checkTarget
+        // call, same lifetime the old downloaded-file cache had.
+        val preparedApkPaths = mutableSetOf<File>()
 
         // APKPure is a fallback: only fetched (once, memoized) when APKMirror
         // doesn't list a version an attachment needs, and only if the target
@@ -224,6 +234,26 @@ class PatchScheduler(
                 }
 
                 val processed = appConfig.processedPatchCacheKeys(schema, target.id)
+
+                // Whether supportedVersions came from an explicit operator
+                // override (attachment.supportedVersions, set via the admin
+                // UI) or was derived from the .mpp file's own declared
+                // compatibility list - the latter is the patch author's
+                // "known to work with" list, not a deliberate per-target pin,
+                // and can include many old historical versions. Matters below:
+                // an explicit override's pins are always honored regardless of
+                // how old they are (the operator asked for exactly that
+                // version), but the derived list's entries are only matched if
+                // they're not older than a version already successfully
+                // patched for this attachment (see [isOlderVersion]) - without
+                // that check, a version still sitting in APKMirror/APKPure's
+                // listing that just happens not to be in [processed] yet (e.g.
+                // one AKPMirror lists/re-lists out of numeric order - its feed
+                // is ordered by publish time, not by version number) would get
+                // patched even though a newer version of the same attachment
+                // was already published, undoing pruneOldVersions's intent of
+                // keeping only the newest versions around.
+                val usingDerivedVersions = attachment.supportedVersions.isEmpty()
                 val supportedVersions = attachment.supportedVersions.ifEmpty {
                     val derived = deriveSupportedVersions(libEntry, target.packageName)
                     if (attachment.includeExperimentalVersions) {
@@ -254,10 +284,24 @@ class PatchScheduler(
                     continue
                 }
 
+                // Already-processed versions for *this* attachment - only
+                // consulted for usingDerivedVersions below (see its comment
+                // above). Cheap best-effort natural-version comparison
+                // ([isOlderVersion]); when it can't confidently tell, it
+                // returns false (permissive) rather than blocking a
+                // legitimately new release with an unusual version format.
+                val processedVersionsForThisPatch by lazy {
+                    processed.mapNotNull { key ->
+                        key.removeSuffix("::${attachment.patchId}").takeIf { it != key }
+                    }
+                }
+
                 fun matchIn(list: List<ScraperClient.VersionEntry>): ScraperClient.VersionEntry? =
                     list.firstOrNull { v ->
                         val cacheKey = "${v.version}::${attachment.patchId}"
-                        cacheKey !in processed && matchesSupportedVersion(v.version, supportedVersions)
+                        cacheKey !in processed &&
+                            matchesSupportedVersion(v.version, supportedVersions) &&
+                            isDerivedCandidateAllowed(v.version, usingDerivedVersions, processedVersionsForThisPatch)
                     }
 
                 // Prefer APKMirror; only reach for the APKPure fallback (which
@@ -293,29 +337,41 @@ class PatchScheduler(
                 val version = candidate.entry.version
                 logger.info("${target.id}: found new patchable version $version for patch '${attachment.patchId}' (source: ${candidate.source.name.lowercase()})")
 
-                val preparedApk = downloadedApks.getOrPut(version) {
-                    prepareApk(target.id, version, candidate.entry.pageUrl, candidate.source) ?: continue
-                }
+                val preparedApkPath = File(tmpDir, "${target.id}-$version-prepared.apk")
+                preparedApkPaths += preparedApkPath
 
-                if (applyPatchToVersion(target, attachment, libEntry, version, preparedApk)) updated = true
+                if (
+                    applyPatchToVersion(
+                        target, attachment, libEntry, version,
+                        candidate.entry.pageUrl, candidate.source, preparedApkPath,
+                    )
+                ) {
+                    updated = true
+                }
             }
         } finally {
-            downloadedApks.values.forEach { it.delete() }
+            preparedApkPaths.forEach { it.delete() }
         }
 
         return updated
     }
 
-    /** Applies one attached patch to an already-downloaded [preparedApk] for
-     * [version], records the result, and returns whether it was published.
-     * Shared by [checkTarget]'s per-version sweep and [runSpecificVersion]'s
-     * direct, user-triggered single-version run. */
+    /** Resolves, downloads, merges (if needed), patches, and signs [version]
+     * of [target] for one attached patch - entirely inside the patch
+     * worker's separate JVM (see [PatchWorkerLauncher]) - then records the
+     * result and returns whether it was published. Shared by [checkTarget]'s
+     * per-version sweep and [runSpecificVersion]'s direct, user-triggered
+     * single-version run; both pass a [preparedApkPath] that's shared across
+     * every attachment for the same [version] so the download/merge only
+     * happens once (see the worker's own existence check). */
     private suspend fun applyPatchToVersion(
         target: AppConfig.EnabledPatchTarget,
         attachment: AppConfig.PatchAttachmentView,
         libEntry: AppConfig.PatchLibraryEntry,
         version: String,
-        preparedApk: File,
+        versionPageUrl: String,
+        source: Source,
+        preparedApkPath: File,
     ): Boolean {
         val patchFile = File(patchesDir, libEntry.file)
         if (!patchFile.exists()) {
@@ -332,7 +388,10 @@ class PatchScheduler(
 
         val result = try {
             patchWorkerLauncher.apply(
-                preparedApk,
+                source.name,
+                versionPageUrl,
+                flareSolverrUrl,
+                preparedApkPath,
                 patchFile,
                 attachment.patchSelection,
                 attachment.optionOverrides,
@@ -367,36 +426,6 @@ class PatchScheduler(
                 logger.error("${target.id}: morphe patch '${attachment.patchId}' failed for $version: ${result.error}")
                 false
             }
-        }
-    }
-
-    /** Downloads the APK for [version] from [source] (merging it first if
-     * it's an .apkm/.xapk bundle), or null on failure. */
-    private fun prepareApk(targetId: String, version: String, pageUrl: String, source: Source): File? {
-        val client = clientFor(source)
-        val downloadInfo = client.resolveDownloadUrl(pageUrl)
-        if (downloadInfo == null) {
-            logger.error("$targetId: failed to resolve download URL for $version")
-            return null
-        }
-        val rawFile = File(tmpDir, "$targetId-$version-download.bin")
-        if (!client.downloadApk(downloadInfo.url, rawFile, downloadInfo.referer)) {
-            logger.error("$targetId: failed to download $version")
-            return null
-        }
-
-        if (!bundleMerger.isBundle(rawFile)) return rawFile
-
-        logger.info("$targetId: $version is an APK bundle; merging all splits")
-        val mergedFile = File(tmpDir, "$targetId-$version-merged.apk")
-        return try {
-            bundleMerger.merge(rawFile, mergedFile)
-            mergedFile
-        } catch (e: Exception) {
-            logger.error("$targetId: failed to merge bundle for $version: $e")
-            null
-        } finally {
-            rawFile.delete()
         }
     }
 
@@ -443,7 +472,60 @@ class PatchScheduler(
         return Regex(escaped)
     }
 
+    /** Gate applied to a version-list match before it's accepted as a
+     * candidate in [checkTarget]'s `matchIn` - pulled out into its own
+     * function (rather than left inline) so it's directly unit-testable
+     * without a network call or DB, the same reasoning [ApkMirrorClient]'s
+     * `internal fun parseFeedVersions`/`pickBestVariantHref` are pulled out
+     * for. An explicit admin-pinned `supportedVersions` list
+     * ([usingDerivedVersions] false) is always honored regardless of version
+     * order - the operator asked for exactly that version. A derived
+     * (non-pinned, `.mpp`-declared) match is only accepted if it isn't
+     * [isOlderVersion] than anything in [alreadyProcessedVersions] - see
+     * [checkTarget]'s comment on [usingDerivedVersions] for why. */
+    internal fun isDerivedCandidateAllowed(
+        candidateVersion: String,
+        usingDerivedVersions: Boolean,
+        alreadyProcessedVersions: Collection<String>,
+    ): Boolean = !usingDerivedVersions || alreadyProcessedVersions.none { isOlderVersion(candidateVersion, it) }
+
+    /** Best-effort "is [candidate] an older release than [processed]" check -
+     * used by [isDerivedCandidateAllowed] to stop a derived (non-pinned)
+     * supported-versions match from regressing past a version already
+     * successfully patched for the same attachment. Splits both strings into
+     * alternating digit/non-digit runs and compares them pairwise (numeric
+     * runs as integers, others as plain strings); returns false - rather than
+     * guessing - the moment the two versions don't decompose into directly
+     * comparable runs (different token counts, or a digit run lined up
+     * against a non-digit one), since APKMirror/APKPure version strings don't
+     * reliably follow one format (see [matchesSupportedVersion]'s callers)
+     * and a wrong "older" guess would silently block a legitimately new
+     * release. */
+    internal fun isOlderVersion(candidate: String, processed: String): Boolean {
+        val a = VERSION_TOKEN_RE.findAll(candidate).map { it.value }.toList()
+        val b = VERSION_TOKEN_RE.findAll(processed).map { it.value }.toList()
+        if (a.isEmpty() || a.size != b.size) return false
+
+        for (i in a.indices) {
+            val (tokenA, tokenB) = a[i] to b[i]
+            val aIsDigits = tokenA[0].isDigit()
+            val bIsDigits = tokenB[0].isDigit()
+            if (aIsDigits != bIsDigits) return false
+
+            val cmp = if (aIsDigits) {
+                val numA = tokenA.toBigIntegerOrNull() ?: return false
+                val numB = tokenB.toBigIntegerOrNull() ?: return false
+                numA.compareTo(numB)
+            } else {
+                tokenA.compareTo(tokenB)
+            }
+            if (cmp != 0) return cmp < 0
+        }
+        return false
+    }
+
     companion object {
+        private val VERSION_TOKEN_RE = Regex("""\d+|\D+""")
         private const val MAX_VERSIONS_PER_APP = 3
     }
 }
