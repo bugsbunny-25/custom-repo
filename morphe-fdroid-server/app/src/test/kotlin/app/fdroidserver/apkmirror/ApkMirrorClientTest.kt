@@ -204,14 +204,19 @@ class ApkMirrorClientTest {
     """.trimIndent()
 
     @Test
-    fun `retries past a transient Cloudflare challenge and returns the real versions`() {
-        val server = startFeedServer(feed = listOf(FakeResponse(200, cloudflareChallengeBody), FakeResponse(200, disneyFeedXml)))
+    fun `falls back to FlareSolverr on the very first Cloudflare challenge and returns the real versions`() {
+        // MAX_FETCH_ATTEMPTS is 1 - get() no longer retries a challenge
+        // in-process at all, so a transient challenge is only ever cleared
+        // via the FlareSolverr fallback, on the first attempt.
+        val flareSolverr = startFlareSolverrServer { Json.encodeToString(disneyFeedXml).let { """{"status":"ok","solution":{"response":$it,"cookies":[]}}""" } }
+        val server = startFeedServer(feed = listOf(FakeResponse(200, cloudflareChallengeBody)))
         try {
-            val client = ApkMirrorClient()
+            val client = ApkMirrorClient(flareSolverrUrl = "http://127.0.0.1:${flareSolverr.address.port}/v1")
             val versions = client.getVersions("http://127.0.0.1:${server.address.port}/apk/disney/disney")
             assertEquals("26.11.0+rc3-2026.06.24", versions.first().version)
         } finally {
             server.stop(0)
+            flareSolverr.stop(0)
         }
     }
 
@@ -234,18 +239,22 @@ class ApkMirrorClientTest {
 
     @Test
     fun `treats a cf-mitigated challenge header as a challenge even with an ordinary body`() {
+        // No second feed response queued (unlike the old plain-retry version
+        // of this test) - MAX_FETCH_ATTEMPTS is 1, so the only way past a
+        // detected challenge is the FlareSolverr fallback below; the point of
+        // this test is solely that the header alone (with a body that
+        // doesn't match the challenge-page regex) is still detected as one.
+        val flareSolverr = startFlareSolverrServer { Json.encodeToString(disneyFeedXml).let { """{"status":"ok","solution":{"response":$it,"cookies":[]}}""" } }
         val server = startFeedServer(
-            feed = listOf(
-                FakeResponse(200, "not actually a challenge page", mapOf("cf-mitigated" to "challenge")),
-                FakeResponse(200, disneyFeedXml),
-            ),
+            feed = listOf(FakeResponse(200, "not actually a challenge page", mapOf("cf-mitigated" to "challenge"))),
         )
         try {
-            val client = ApkMirrorClient()
+            val client = ApkMirrorClient(flareSolverrUrl = "http://127.0.0.1:${flareSolverr.address.port}/v1")
             val versions = client.getVersions("http://127.0.0.1:${server.address.port}/apk/disney/disney")
             assertEquals("26.11.0+rc3-2026.06.24", versions.first().version)
         } finally {
             server.stop(0)
+            flareSolverr.stop(0)
         }
     }
 

@@ -1,5 +1,8 @@
 package app.fdroidserver.patching
 
+import app.fdroidserver.apkmirror.ApkMirrorClient
+import app.fdroidserver.apkpure.ApkPureClient
+import app.fdroidserver.scraper.ScraperClient
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.slf4j.Logger
@@ -13,13 +16,24 @@ private val json = Json { ignoreUnknownKeys = true }
 
 /**
  * On-disk request handed to the `--patch-worker` child process - everything
- * [PatchApplier.apply] needs, minus the already-loaded `Set<Patch<*>>` (not
- * JSON-serializable), which the worker rebuilds itself from [patchFile] +
- * [patchSelection] + [optionOverrides] via [PatchSelector.applyOverrides].
+ * needed to go from a version page URL all the way to a signed, patched APK:
+ * resolving + downloading the APK, merging it if it's a split bundle, and
+ * running [PatchApplier]. [patchSelection]/[optionOverrides] stand in for an
+ * already-loaded `Set<Patch<*>>` (not JSON-serializable) - the worker
+ * rebuilds it itself from [patchFile] via [PatchSelector.applyOverrides].
  */
 @Serializable
 private data class PatchWorkerRequest(
-    val inputApk: String,
+    /** "APKMIRROR" or "APKPURE" - which client to resolve/download through. */
+    val source: String,
+    val versionPageUrl: String,
+    val flareSolverrUrl: String?,
+    /** Stable per-(target, version) path outside [workDir] - if it already
+     * exists (a previous job for the same version left it there), download
+     * and merge are skipped and this file is patched directly. Callers
+     * with multiple patches for the same version pass the same path so the
+     * (possibly large) download/merge only happens once. */
+    val preparedApkPath: String,
     val patchFile: String,
     val patchSelection: Map<String, Boolean>,
     val optionOverrides: Map<String, Map<String, String>>,
@@ -42,14 +56,19 @@ private data class PatchWorkerResponse(
 )
 
 /**
- * Runs the APK patch/sign pipeline ([PatchApplier]) in a short-lived child
- * JVM instead of the long-running admin-server process, so the admin
- * server's own heap (capped at `-Xmx512m` in supervisord.conf to keep idle
- * container RAM small) doesn't have to be sized for the patch pipeline's
- * memory-spiky decompile/rewrite/re-sign work. The child is spawned with no
- * `-Xmx`/GC/allocator flags at all - it gets the JVM's normal default sizing
- * (a fraction of whatever memory it sees, host or cgroup) rather than
- * inheriting the admin server's deliberately tight limits.
+ * Runs the *entire* per-version patch job - resolving the download URL,
+ * downloading the APK, merging it if it's a split bundle ([BundleMerger]),
+ * and patching/signing it ([PatchApplier]) - in a short-lived child JVM
+ * instead of the long-running admin-server process. The admin server's own
+ * heap is capped at `-Xmx512m` in supervisord.conf to keep idle container RAM
+ * small; none of the memory-heavy APK work (resource-table parsing during
+ * bundle merge, decompile/rewrite/re-sign during patching) should run there,
+ * so [PatchScheduler] only ever does version-matching/DB/orchestration work
+ * and hands this class a version page URL + patch config - never a
+ * downloaded file. The child is spawned with no `-Xmx`/GC/allocator flags at
+ * all - it gets the JVM's normal default sizing (a fraction of whatever
+ * memory it sees, host or cgroup) rather than inheriting the admin server's
+ * deliberately tight limits.
  *
  * Request/response cross the process boundary as JSON files under the JVM's
  * temp directory (not the persisted `/srv/fdroid` volume) - simpler than
@@ -62,7 +81,10 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
     private val jarPath = File(PatchWorkerLauncher::class.java.protectionDomain.codeSource.location.toURI()).absolutePath
 
     fun apply(
-        inputApk: File,
+        source: String,
+        versionPageUrl: String,
+        flareSolverrUrl: String?,
+        preparedApkPath: File,
         patchFile: File,
         patchSelection: Map<String, Boolean>,
         optionOverrides: Map<String, Map<String, String>>,
@@ -79,7 +101,10 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
             requestFile.writeText(
                 json.encodeToString(
                     PatchWorkerRequest(
-                        inputApk = inputApk.absolutePath,
+                        source = source,
+                        versionPageUrl = versionPageUrl,
+                        flareSolverrUrl = flareSolverrUrl,
+                        preparedApkPath = preparedApkPath.absolutePath,
                         patchFile = patchFile.absolutePath,
                         patchSelection = patchSelection,
                         optionOverrides = optionOverrides,
@@ -139,8 +164,9 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
 /**
  * Entry point for the child process spawned by [PatchWorkerLauncher] -
  * dispatched to from `Main.kt`'s `main(args)` when invoked as
- * `--patch-worker <requestFile> <responseFile>`. Runs one patch/sign job and
- * exits; never touches the admin server, database, or scheduler loops.
+ * `--patch-worker <requestFile> <responseFile>`. Runs one version's whole
+ * download-through-sign job and exits; never touches the admin server,
+ * database, or scheduler loops.
  */
 object PatchWorkerEntryPoint {
     private val logger = LoggerFactory.getLogger(PatchWorkerEntryPoint::class.java.name)
@@ -155,33 +181,7 @@ object PatchWorkerEntryPoint {
         }
 
         val response = try {
-            val applier = PatchApplier()
-            val loadedPatches = applier.loadPatches(File(request.patchFile))
-            val patchesToApply = PatchSelector.applyOverrides(
-                loadedPatches,
-                request.patchSelection,
-                request.optionOverrides,
-                request.packageName,
-            )
-            val signing = PatchApplier.SigningConfig(
-                keystoreFile = File(request.keystoreFile),
-                keystorePassword = request.keystorePassword,
-                keyAlias = request.keyAlias,
-                keyPassword = request.keyPassword,
-                signerName = request.signerName,
-            )
-            when (
-                val result = applier.apply(
-                    File(request.inputApk),
-                    patchesToApply,
-                    File(request.outputApk),
-                    File(request.workDir),
-                    signing,
-                )
-            ) {
-                is PatchApplier.ApplyResult.Success -> PatchWorkerResponse(true, result.packageName, result.versionName)
-                is PatchApplier.ApplyResult.Failure -> PatchWorkerResponse(false, result.packageName, error = result.error.toString())
-            }
+            runJob(request)
         } catch (e: Exception) {
             logger.error("Patch worker job failed: $e")
             PatchWorkerResponse(false, error = e.toString())
@@ -189,5 +189,67 @@ object PatchWorkerEntryPoint {
 
         responseFile.writeText(json.encodeToString(response))
         return if (response.success) 0 else 1
+    }
+
+    private fun runJob(request: PatchWorkerRequest): PatchWorkerResponse {
+        val workDir = File(request.workDir).apply { mkdirs() }
+        val preparedApk = File(request.preparedApkPath)
+
+        if (!preparedApk.exists()) {
+            val client: ScraperClient = if (request.source == "APKPURE") {
+                ApkPureClient(flareSolverrUrl = request.flareSolverrUrl)
+            } else {
+                ApkMirrorClient(flareSolverrUrl = request.flareSolverrUrl)
+            }
+
+            val downloadInfo = client.resolveDownloadUrl(request.versionPageUrl)
+                ?: return PatchWorkerResponse(false, error = "failed to resolve download URL for ${request.versionPageUrl}")
+
+            val rawFile = File(workDir, "download.bin")
+            if (!client.downloadApk(downloadInfo.url, rawFile, downloadInfo.referer)) {
+                return PatchWorkerResponse(false, error = "failed to download ${request.versionPageUrl}")
+            }
+
+            // Bundle merging (.apkm/.xapk splits -> one APK) loads every
+            // split's resource table into memory via reandroid and is just as
+            // memory-spiky as patching itself - this is exactly why it (like
+            // the download above) runs here, in the unbounded-heap worker,
+            // rather than in PatchScheduler's admin-server process.
+            val bundleMerger = BundleMerger()
+            if (bundleMerger.isBundle(rawFile)) {
+                bundleMerger.merge(rawFile, preparedApk)
+                rawFile.delete()
+            } else {
+                rawFile.renameTo(preparedApk)
+            }
+        }
+
+        val applier = PatchApplier()
+        val loadedPatches = applier.loadPatches(File(request.patchFile))
+        val patchesToApply = PatchSelector.applyOverrides(
+            loadedPatches,
+            request.patchSelection,
+            request.optionOverrides,
+            request.packageName,
+        )
+        val signing = PatchApplier.SigningConfig(
+            keystoreFile = File(request.keystoreFile),
+            keystorePassword = request.keystorePassword,
+            keyAlias = request.keyAlias,
+            keyPassword = request.keyPassword,
+            signerName = request.signerName,
+        )
+        return when (
+            val result = applier.apply(
+                preparedApk,
+                patchesToApply,
+                File(request.outputApk),
+                workDir,
+                signing,
+            )
+        ) {
+            is PatchApplier.ApplyResult.Success -> PatchWorkerResponse(true, result.packageName, result.versionName)
+            is PatchApplier.ApplyResult.Failure -> PatchWorkerResponse(false, result.packageName, error = result.error.toString())
+        }
     }
 }

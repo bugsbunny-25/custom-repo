@@ -312,7 +312,7 @@ abstract class ScraperClient(
         // APKPure (HTML listing pages, RSS feeds, and download pages alike).
         private val CLOUDFLARE_CHALLENGE_RE = Regex("""<title>Just a moment\.\.\.</title>|_cf_chl_opt|challenges\.cloudflare\.com""")
 
-        private const val MAX_FETCH_ATTEMPTS = 3
+        private const val MAX_FETCH_ATTEMPTS = 1
         private const val BASE_RETRY_DELAY_MS = 1_500L
         private const val MAX_RETRY_DELAY_MS = 8_000L
         private const val JITTER_MS = 750L
