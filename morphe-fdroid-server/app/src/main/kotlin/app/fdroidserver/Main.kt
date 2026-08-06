@@ -13,6 +13,8 @@ import app.fdroidserver.patching.PatchApplier
 import app.fdroidserver.patching.PatchLibrary
 import app.fdroidserver.patching.PatchLibraryGithubScheduler
 import app.fdroidserver.patching.PatchScheduler
+import app.fdroidserver.patching.PatchWorkerEntryPoint
+import app.fdroidserver.patching.PatchWorkerLauncher
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import kotlinx.coroutines.CancellationException
@@ -37,7 +39,17 @@ import kotlin.time.Duration.Companion.seconds
  * the container's `/app` layout) - [AppDatabase] creates `app.db` inside it
  * on first run if it doesn't exist yet.
  */
-fun main() {
+fun main(args: Array<String>) {
+    // Dispatched to by PatchWorkerLauncher, which re-invokes this same jar as
+    // `java -jar app.jar --patch-worker <requestFile> <responseFile>` in a
+    // fresh, short-lived JVM with no -Xmx/GC overrides - keeps the memory-
+    // spiky APK patch/sign pipeline off the long-running admin-server JVM's
+    // deliberately small heap. Everything below this is the normal
+    // admin-server/scheduler startup path.
+    if (args.size == 3 && args[0] == PatchWorkerLauncher.PATCH_WORKER_FLAG) {
+        kotlin.system.exitProcess(PatchWorkerEntryPoint.run(args[1], args[2]))
+    }
+
     val logger = LoggerFactory.getLogger("Main")
 
     val dbDir = File(System.getenv("DB_PATH") ?: "/app/db")
@@ -65,17 +77,17 @@ fun main() {
     val apkMirrorClient = ApkMirrorClient()
     val apkPureClient = ApkPureClient()
     val bundleMerger = BundleMerger()
-    val patchApplier = PatchApplier()
+    val patchWorkerLauncher = PatchWorkerLauncher()
     val signing = PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-keystore.jks"))
     val signingTv = PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-tv-keystore.jks"))
     val patchScheduler = PatchScheduler(
         appConfig, apkMirrorClient, apkPureClient, patchLibrary, bundleMerger,
-        patchApplier, patchesDir, patchedRepoDir, tmpDir, fdroidRepoManager, signing,
+        patchWorkerLauncher, patchesDir, patchedRepoDir, tmpDir, fdroidRepoManager, signing,
         schema = AppConfig.PatchSchemas.Mobile,
     )
     val patchSchedulerTv = PatchScheduler(
         appConfig, apkMirrorClient, apkPureClient, patchLibrary, bundleMerger,
-        patchApplier, patchesTvDir, patchedTvRepoDir, tmpDir, fdroidRepoManager, signingTv,
+        patchWorkerLauncher, patchesTvDir, patchedTvRepoDir, tmpDir, fdroidRepoManager, signingTv,
         schema = AppConfig.PatchSchemas.Tv,
     )
 

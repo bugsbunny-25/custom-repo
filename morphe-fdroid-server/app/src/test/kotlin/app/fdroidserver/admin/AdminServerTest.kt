@@ -11,6 +11,7 @@ import app.fdroidserver.patching.PatchApplier
 import app.fdroidserver.patching.PatchLibrary
 import app.fdroidserver.patching.PatchLibraryGithubScheduler
 import app.fdroidserver.patching.PatchScheduler
+import app.fdroidserver.patching.PatchWorkerLauncher
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.HttpClient
 import io.ktor.client.request.delete
@@ -50,13 +51,13 @@ class AdminServerTest {
         val fdroidRepoManager = FdroidRepoManager()
         val tmpDir = File(tempDir, "tmp").apply { mkdirs() }
         val patchScheduler = PatchScheduler(
-            appConfig, ApkMirrorClient(), ApkPureClient(), PatchLibrary(), BundleMerger(), PatchApplier(),
+            appConfig, ApkMirrorClient(), ApkPureClient(), PatchLibrary(), BundleMerger(), PatchWorkerLauncher(),
             patchesDir, patchedRepoDir, tmpDir, fdroidRepoManager,
             PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-keystore.jks")),
             schema = AppConfig.PatchSchemas.Mobile,
         )
         val patchSchedulerTv = PatchScheduler(
-            appConfig, ApkMirrorClient(), ApkPureClient(), PatchLibrary(), BundleMerger(), PatchApplier(),
+            appConfig, ApkMirrorClient(), ApkPureClient(), PatchLibrary(), BundleMerger(), PatchWorkerLauncher(),
             patchesTvDir, patchedTvRepoDir, tmpDir, fdroidRepoManager,
             PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-tv-keystore.jks")),
             schema = AppConfig.PatchSchemas.Tv,

@@ -32,7 +32,7 @@ class PatchScheduler(
     private val apkPureClient: ApkPureClient,
     private val patchLibrary: PatchLibrary,
     private val bundleMerger: BundleMerger,
-    private val patchApplier: PatchApplier,
+    private val patchWorkerLauncher: PatchWorkerLauncher,
     private val patchesDir: File,
     private val patchedRepoDir: File,
     private val tmpDir: File,
@@ -328,17 +328,19 @@ class PatchScheduler(
         outputPath.parentFile?.mkdirs()
         val cacheKey = "$version::${attachment.patchId}"
 
-        val loadedPatches = patchApplier.loadPatches(patchFile)
-        val patchesToApply = PatchSelector.applyOverrides(
-            loadedPatches,
-            attachment.patchSelection,
-            attachment.optionOverrides,
-            target.packageName,
-        )
         val workDir = File(tmpDir, "patch-${target.id}-${attachment.patchId}-${System.currentTimeMillis()}")
 
         val result = try {
-            patchApplier.apply(preparedApk, patchesToApply, outputPath, workDir, signing)
+            patchWorkerLauncher.apply(
+                preparedApk,
+                patchFile,
+                attachment.patchSelection,
+                attachment.optionOverrides,
+                target.packageName,
+                outputPath,
+                workDir,
+                signing,
+            )
         } finally {
             workDir.deleteRecursively()
         }
