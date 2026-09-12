@@ -41,10 +41,11 @@ import kotlin.time.Duration.Companion.seconds
 fun main(args: Array<String>) {
     // Dispatched to by PatchWorkerLauncher, which re-invokes this same jar as
     // `java -jar app.jar --patch-worker <requestFile> <responseFile>` in a
-    // fresh, short-lived JVM with no -Xmx/GC overrides - keeps the memory-
-    // spiky APK patch/sign pipeline off the long-running admin-server JVM's
-    // deliberately small heap. Everything below this is the normal
-    // admin-server/scheduler startup path.
+    // fresh, short-lived JVM - keeps the memory-spiky APK patch/sign pipeline
+    // out of the long-running admin-server process, so a patch run's peak
+    // usage is reclaimed by the OS the moment the job ends instead of sitting
+    // in the admin server's heap for the container's lifetime. Everything
+    // below this is the normal admin-server/scheduler startup path.
     if (args.size == 3 && args[0] == PatchWorkerLauncher.PATCH_WORKER_FLAG) {
         kotlin.system.exitProcess(PatchWorkerEntryPoint.run(args[1], args[2]))
     }

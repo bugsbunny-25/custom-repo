@@ -59,16 +59,17 @@ private data class PatchWorkerResponse(
  * Runs the *entire* per-version patch job - resolving the download URL,
  * downloading the APK, merging it if it's a split bundle ([BundleMerger]),
  * and patching/signing it ([PatchApplier]) - in a short-lived child JVM
- * instead of the long-running admin-server process. The admin server's own
- * heap is capped at `-Xmx512m` in supervisord.conf to keep idle container RAM
- * small; none of the memory-heavy APK work (resource-table parsing during
- * bundle merge, decompile/rewrite/re-sign during patching) should run there,
- * so [PatchScheduler] only ever does version-matching/DB/orchestration work
- * and hands this class a version page URL + patch config - never a
- * downloaded file. The child is spawned with no `-Xmx`/GC/allocator flags at
- * all - it gets the JVM's normal default sizing (a fraction of whatever
- * memory it sees, host or cgroup) rather than inheriting the admin server's
- * deliberately tight limits.
+ * instead of the long-running admin-server process. None of the memory-heavy
+ * APK work (resource-table parsing during bundle merge, decompile/rewrite/
+ * re-sign during patching) should run there, so [PatchScheduler] only ever
+ * does version-matching/DB/orchestration work and hands this class a version
+ * page URL + patch config - never a downloaded file. Whatever a patch run
+ * peaks at is then given back to the OS when the child exits, rather than
+ * staying resident in the admin server's heap for the container's lifetime.
+ *
+ * Both JVMs run with no resource flags (see supervisord.conf) and size
+ * themselves against whatever memory they see - the container's cgroup limit
+ * if one is set, the host's RAM otherwise.
  *
  * Request/response cross the process boundary as JSON files under the JVM's
  * temp directory (not the persisted `/srv/fdroid` volume) - simpler than
