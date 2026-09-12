@@ -1,0 +1,109 @@
+name: Sync vendored Morphe engine
+
+# Watches MorpheApp/morphe-desktop for a new *stable* release and, when the
+# engine code we vendor actually changed, opens a PR with the update: the
+# re-copied files, the local deltas re-applied, FORK_INFO bumped, and
+# morphe-patcher moved to whatever upstream now pins.
+#
+# A release that doesn't touch the engine produces no PR - only real changes
+# are worth your attention.
+
+on:
+  schedule:
+    # 07:00 UTC daily. Cheap (a couple of API calls when nothing changed), and
+    # a day's latency is irrelevant for a vendored dependency.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag to sync to (blank = latest stable release)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Sync the engine from upstream
+        id: sync
+        env:
+          # gh is used only to resolve the latest release tag.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/sync-morphe-engine.sh ${{ inputs.tag }}
+
+      - name: Open a pull request
+        if: steps.sync.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          # A PAT makes the PR trigger the docker-publish workflow, so you get
+          # a real "does it still build on both arches" signal before merging.
+          # Falls back to GITHUB_TOKEN, which still opens the PR but - by
+          # design, to prevent workflow recursion - starts no checks on it.
+          token: ${{ secrets.ENGINE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          branch: chore/engine-sync-${{ steps.sync.outputs.to_tag }}
+          # One branch per upstream release: each is reviewed and merged on its
+          # own, and merging one never silently drops another.
+          delete-branch: true
+          # Assignment is what actually reaches you - GitHub emails the
+          # assignee, no SMTP secrets or third-party action needed.
+          assignees: ${{ github.repository_owner }}
+          labels: |
+            morphe-engine
+            automated
+          commit-message: |
+            Sync vendored Morphe engine to ${{ steps.sync.outputs.to_tag }}
+
+            Re-copied from MorpheApp/morphe-desktop at
+            ${{ steps.sync.outputs.to_tag }} (was ${{ steps.sync.outputs.from_tag }}),
+            with the local deltas in local-deltas/ re-applied.
+
+            Local delta status: ${{ steps.sync.outputs.delta_status }}
+            morphe-patcher: ${{ steps.sync.outputs.patcher_note }}
+          title: 'Sync vendored Morphe engine to ${{ steps.sync.outputs.to_tag }}'
+          body: |
+            Automated re-sync of the vendored `app.morphe.engine` package.
+
+            | | |
+            | --- | --- |
+            | from | `${{ steps.sync.outputs.from_tag }}` |
+            | to | `${{ steps.sync.outputs.to_tag }}` |
+            | local deltas | **${{ steps.sync.outputs.delta_status }}** |
+            | morphe-patcher | ${{ steps.sync.outputs.patcher_note }} |
+
+            **Local deltas**
+            ${{ steps.sync.outputs.delta_notes }}
+            **Changed**
+            ${{ steps.sync.outputs.changed_files }}
+
+            ${{ steps.sync.outputs.missing_files && format('⚠️ **No longer present upstream:** `{0}` - these were renamed, split, or deleted. Do not just merge; work out where they went.', steps.sync.outputs.missing_files) || '' }}
+
+            **Before merging**
+            - Read the `PatchEngine.kt` / `PatchExtensions.kt` diff rather than
+              skimming it - this code patches APKs unattended.
+            - If the delta status above is anything but `clean`, fix that first.
+              `obsolete` means upstream adopted our fix and the patch file in
+              `local-deltas/` should be deleted; `failed` means it has to be
+              re-applied by hand.
+            - A `morphe-patcher` bump means the patcher API may have moved
+              under the engine *and* under `app.fdroidserver.patching`. The
+              build failing is the obvious signal; a silently changed default
+              is not.
+            - Check [upstream's release notes](https://github.com/MorpheApp/morphe-desktop/releases/tag/${{ steps.sync.outputs.to_tag }}).
+
+            Raised by `.github/workflows/morphe-engine-sync.yml`. To do this by
+            hand: `scripts/sync-morphe-engine.sh [tag]`.
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.sync.outputs.changed }}" = "true" ]; then
+            echo "Opened/updated a PR syncing to ${{ steps.sync.outputs.to_tag }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No sync needed (${{ steps.sync.outputs.reason }})" >> "$GITHUB_STEP_SUMMARY"
+          fi

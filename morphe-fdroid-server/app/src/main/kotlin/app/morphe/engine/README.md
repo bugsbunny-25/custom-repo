@@ -63,13 +63,25 @@ Kept as small as possible so re-syncing stays cheap:
 
 ## Re-syncing
 
+**This is automated.** `.github/workflows/morphe-engine-sync.yml` checks
+morphe-desktop for a new stable release daily and, when the engine we vendor
+actually changed, opens a PR with the files re-copied, the deltas re-applied,
+`FORK_INFO` bumped, and `morphe-patcher` moved to whatever upstream now pins.
+A release that doesn't touch the engine produces no PR.
+
+To run it yourself - the workflow calls exactly this:
+
 ```bash
-git clone --depth 1 https://github.com/MorpheApp/morphe-desktop /tmp/morphe-desktop
-diff -ru /tmp/morphe-desktop/src/main/kotlin/app/morphe/engine \
-         morphe-fdroid-server/app/src/main/kotlin/app/morphe/engine
+scripts/sync-morphe-engine.sh            # latest stable upstream release
+scripts/sync-morphe-engine.sh v1.16.0    # a specific tag
 ```
 
-Re-apply the deltas above, and check `gradle/libs.versions.toml` against
-morphe-desktop's own catalog - the engine is written against a specific
-`morphe-patcher`, and a bundle built for a newer patcher than we ship is
-rejected by `PatcherCompatibility` at load time.
+The deltas above live in `local-deltas/` as patch files so the sync can put
+them back; see that directory's `README.md` for how to add one and what the
+reported statuses mean. Anything other than `clean` needs a human before the
+PR is merged.
+
+The `morphe-patcher` pin moves with the engine because the engine is compiled
+against it, and a bundle built for a newer patcher than we ship is rejected by
+`PatcherCompatibility` at load time. A bump there means re-checking the patcher
+API surface used by both the engine and `app.fdroidserver.patching`.
