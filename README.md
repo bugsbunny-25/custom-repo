@@ -321,6 +321,125 @@ that is an explicit request for that version.
   exec fdroid-repo tail -f /var/log/supervisor/fdroid-server.log` or
   `docker-compose logs -f`).
 
+## Memory and resource limits
+
+The container ships with **no JVM resource flags and no `mem_limit`**. Both JVMs
+size themselves the way the JVM normally does. This section explains what that
+costs, how to put a bound back, and what breaks if you set it too low - all
+numbers below are measured, not estimated (see *Measurements* for the setup).
+
+### Where the memory actually goes
+
+There are two JVMs with completely different profiles:
+
+| | admin server | patch worker |
+| --- | --- | --- |
+| lifetime | the container's | one patch job (~2-3 min) |
+| work | admin UI, schedulers, DB, HTML scraping | download, bundle merge, decompile/patch/rebuild/sign |
+| measured RSS | **~300 MiB, flat** | **up to ~1.76 GiB** |
+
+This split is deliberate (see `PatchWorker.kt`): the memory-spiky work runs in a
+short-lived child JVM, so its peak is returned to the OS the moment the job
+ends instead of sitting in the long-running process for the container's life.
+
+It also means the JVM flags that used to be here - `-Xmx512m -Xms64m
+-XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -Dio.netty.allocator.type=unpooled
+-XX:MaxDirectMemorySize=64m`, plus `MALLOC_ARENA_MAX=2` - only ever constrained
+the **admin server's idle footprint**. They never bounded a patch run, which is
+where essentially all the memory goes.
+
+### The trap: a container limit is roughly 4x the usable heap
+
+With no `-Xmx`, a JVM sets its max heap to **25% of the memory it can see**
+(`MaxRAMPercentage` defaults to 25), and in a container that is the cgroup
+limit. So `mem_limit: 1g` does not give the patcher 1 GiB - it gives it a
+**256 MiB heap**, and the run dies of `OutOfMemoryError` while the container
+still has ~140 MiB free. Measured: at a 1 GiB limit the cgroup peaked at
+860 MiB and the patch still failed.
+
+Raising the fraction doesn't rescue an undersized container, it just moves the
+failure: at a 1.5 GiB limit with `-XX:MaxRAMPercentage=55` (887 MiB heap) the
+JVM survived longer, the container hit its ceiling instead, and the kernel
+OOM-killed the worker.
+
+### Measurements
+
+YouTube 21.36.45 (~150 MiB input, 217 MiB signed output), 81 patches applied,
+`morphe-patches` v1.42.0, arm64, 4 CPUs. Sampled every 2s.
+
+| `mem_limit` | `MaxRAMPercentage` | worker max heap | result | cgroup peak | worker RSS peak |
+| --- | --- | --- | --- | --- | --- |
+| none / 4 GiB | 25% (default) | 1024 MiB | works | 3325 MiB | 1759 MiB |
+| 2 GiB | 25% (default) | 512 MiB | works | 1942 MiB | 1030 MiB |
+| 1.5 GiB | 25% (default) | 384 MiB | **fails** - JVM heap OOM (exit 1) | 1490 MiB | 1239 MiB |
+| 1 GiB | 25% (default) | 256 MiB | **fails** - JVM heap OOM (exit 1) | 860 MiB | - |
+| 1.5 GiB | 55% | 887 MiB | **fails** - kernel OOM kill (exit 137) | 1536 MiB (= limit) | - |
+
+Idle, with the repo initialized and a 9.4 MiB `.mpp` imported: admin server
+~300 MiB RSS, whole container ~690 MiB.
+
+Two things to read carefully:
+
+- **`memory.current` overstates demand.** The 3325 MiB peak at a 4 GiB limit is
+  mostly page cache from writing a 217 MiB APK and re-packing 15,938 archive
+  entries; it is reclaimable. Anonymous memory right after the run was 309 MiB.
+  A container sitting near its limit is not necessarily in trouble.
+- **Smaller apps are far cheaper.** The same pipeline on a 33 MiB APK with two
+  patches peaks in the low hundreds of MiB. These numbers are the ceiling for a
+  YouTube-class app, not the typical cost.
+
+### Recommendations
+
+- **Leave it unbounded** (the default) unless idle RAM on a big host actually
+  bothers you. The admin server's *resident* footprint stays ~300 MiB no matter
+  how large its max heap is - the max is a ceiling, not a reservation.
+- **If you want one number:** `mem_limit: 3g` in `docker-compose.yml`. That
+  clears the measured 1.76 GiB worker peak with room for page cache and a
+  second scheduler tab, and lets both JVMs size themselves from the cgroup.
+- **Tight but viable:** `mem_limit: 2g`. Verified to complete a full YouTube
+  patch. Leaves little headroom - a larger app or more patches may not fit.
+- **Do not go below 2 GiB** if you patch YouTube-class apps. 1.5 GiB failed both
+  with the default fraction and with a raised one.
+- **Do not set `-Xmx` on the worker.** It is spawned deliberately without flags
+  so it can use whatever the machine has for the duration of one job.
+- **Want a small idle footprint *and* working patch runs?** Put the old flags
+  back on the **admin server only**, as command-line arguments in
+  `supervisord.conf`:
+
+  ```
+  command=java -Xmx512m -Xms64m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC \
+      -Dio.netty.allocator.type=unpooled -XX:MaxDirectMemorySize=64m -jar /app/app.jar
+  ```
+
+  Use the command line, **not** `JAVA_TOOL_OPTIONS`: the worker is launched with
+  `ProcessBuilder` and inherits the environment, so anything set that way lands
+  on the patch worker too and re-creates exactly the problem above. (`-Xmx512m`
+  on the admin server is safe - it was the shipped default for a long time.)
+
+### Recognizing a too-small limit
+
+The two failure modes look different and the log now names both:
+
+- `patch worker exited with code 1 without writing a response - check the
+  worker's output above for OutOfMemoryError (the JVM's own heap, not the
+  container limit)` - the **JVM heap** was too small. Raise `mem_limit`; the
+  container itself may look far from full.
+- `patch worker exited with code 137 without writing a response - killed by
+  SIGKILL, which normally means the container hit its memory limit` - the
+  **container** ran out and the kernel killed the worker. Confirm with
+  `cat /sys/fs/cgroup/memory.events` inside the container (`oom_kill` > 0).
+
+Either way the job fails cleanly: no APK is published, nothing is recorded as
+processed, and the next scheduled run retries the same version.
+
+### Unrelated limit worth knowing
+
+"Patch now" and "Patch specific version" are synchronous, and a YouTube-class
+patch takes 2-3 minutes - longer than nginx's `proxy_read_timeout`. The browser
+gets a **504 Gateway Time-out while the patch continues and completes
+normally**. Watch the logs rather than the HTTP response, and re-check the
+Patched Apps list afterwards.
+
 ## Configuration Options
 
 Everything below is configured from the admin UI at `/admin` (Settings tab

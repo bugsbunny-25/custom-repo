@@ -11,21 +11,43 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  # One job per architecture, each on a runner of that architecture, pushing an
+  # image *by digest only* (no tag). The `merge` job below then stitches those
+  # digests into a single multi-arch manifest list under the real tags.
+  #
+  # Why native runners rather than one job with `platforms: linux/amd64,linux/arm64`:
+  # that form cross-builds the non-native arch under QEMU, and this image's build
+  # is a full Gradle compile plus an Android SDK install - emulated, the arm64 leg
+  # takes hours and routinely hits the job timeout. `ubuntu-24.04-arm` is a real
+  # arm64 runner (free for public repos), so each leg builds natively at roughly
+  # the speed the amd64 build already ran at, in parallel.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
 
     steps:
+      # "linux/arm64" -> "linux-arm64", for artifact names (slashes aren't allowed).
+      - name: Prepare platform slug
+        run: echo "PLATFORM_SLUG=${{ matrix.platform }}" | tr '/' '-' >> "$GITHUB_ENV"
+
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      # Required for the --secret build mount used below.
+      # Required for the --secret build mount used by the Dockerfile.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Log in to the Container registry
       - name: Log in to the Container registry
         uses: docker/login-action@v4
         with:
@@ -33,27 +55,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Extract metadata (tags, labels) for Docker
+      # Labels only here - tags are applied once, by the merge job, to the
+      # manifest list rather than to each per-arch image.
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      # Build and push Docker image
-      - name: Build and push Docker image
+      - name: Build and push image by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          # push-by-digest: publish the per-arch image with no tag of its own,
+          # returning its digest for the merge job. name-canonical keeps the
+          # image's own name field pointing at the canonical repository.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           # Buildx attaches provenance/SBOM attestations by default, each
           # pushed as its own manifest referenced by digest (sha256-<digest>)
           # rather than by the tags above - disable both so GHCR's tag list
           # only shows the tags metadata-action actually generated.
           provenance: false
           sbom: false
+          # Cache per platform so the two legs don't evict each other's layers.
+          cache-from: type=gha,scope=${{ env.PLATFORM_SLUG }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_SLUG }}
           # morphe-patcher is resolved from GitHub Packages at build time,
           # which requires authentication even for public packages - reuse
           # this workflow's own token (any authenticated account can read a
@@ -62,3 +91,67 @@ jobs:
             GITHUB_ACTOR=${{ github.actor }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
+
+      # Hand the digest to the merge job as a zero-byte file named after it,
+      # so the merge job can reconstruct the full list without needing outputs
+      # from a matrix (which would collapse to a single value).
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ env.PLATFORM_SLUG }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combines the per-arch digests into one tagged manifest list, so
+  # `docker pull`/`container pull` of a tag resolves to the right architecture.
+  merge:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}

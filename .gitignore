@@ -11,6 +11,11 @@ data/
 # Docker volumes
 volumes/
 
+# Local container test scratch (config/db/logs bind mounts) - see README's
+# "Testing the published image locally" section. Contains a real repo
+# keystore and database, so it must never be committed.
+test-data/
+
 # Python
 __pycache__/
 *.py[cod]
