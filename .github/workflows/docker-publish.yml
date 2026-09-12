@@ -99,7 +99,12 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          # The filename is the digest with its "sha256:" prefix stripped:
+          # upload-artifact rejects a colon in any path it uploads, and the
+          # merge job re-adds the prefix when it rebuilds the references
+          # ("...@sha256:%s"). Keep the two in step.
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
         if: github.event_name != 'pull_request'
