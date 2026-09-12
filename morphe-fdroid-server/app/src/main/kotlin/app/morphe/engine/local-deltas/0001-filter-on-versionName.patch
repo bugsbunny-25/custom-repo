@@ -1,0 +1,54 @@
+--- a/PatchEngine.kt
++++ b/PatchEngine.kt
+@@ -73,7 +73,15 @@
+         val success: Boolean,
+         val outputPath: String,
+         val packageName: String,
+-        val packageVersion: String,
++        /**
++         * LOCAL DELTA (see README.md §"Local deltas from upstream"): upstream carries
++         * a single [packageVersion] holding `packageMetadata.versionCode`. Both the
++         * version name and the version code are surfaced here - the name is what patch
++         * compatibility lists are keyed on (and what this server names its output
++         * files after), the code is kept because it is what upstream exposed.
++         */
++        val packageVersionName: String,
++        val packageVersionCode: String,
+         val appliedPatches: List<String>,
+         val failedPatches: List<FailedPatch>,
+         val stepResults: List<StepResult>,
+@@ -135,7 +143,13 @@
+ 
+             Patcher(patcherConfig).use { patcher ->
+                 val packageName = patcher.context.packageMetadata.packageName
+-                val packageVersion = patcher.context.packageMetadata.versionCode
++                // LOCAL DELTA (see README.md): filter on the version NAME. Upstream
++                // compares `versionCode` against `Patch.supportedVersionsFor()`, which
++                // returns `AppTarget.version` - version names, not codes. That never
++                // bites upstream because its only caller passes forceCompatibility=true;
++                // it would silently skip every version-scoped patch here.
++                val packageVersion = patcher.context.packageMetadata.versionName
++                val packageVersionCode = patcher.context.packageMetadata.versionCode
+ 
+                 currentCoroutineContext().ensureActive()
+ 
+@@ -170,7 +184,8 @@
+                     success = false,
+                     outputPath = config.outputApk.absolutePath,
+                     packageName = packageName,
+-                    packageVersion = packageVersion,
++                    packageVersionName = packageVersion,
++                    packageVersionCode = packageVersionCode,
+                     appliedPatches = appliedPatches,
+                     failedPatches = failedPatches,
+                     stepResults = stepResults,
+@@ -273,7 +288,8 @@
+                     success = !config.failOnError || failedPatches.isEmpty(),
+                     outputPath = config.outputApk.absolutePath,
+                     packageName = packageName,
+-                    packageVersion = packageVersion,
++                    packageVersionName = packageVersion,
++                    packageVersionCode = packageVersionCode,
+                     appliedPatches = appliedPatches,
+                     failedPatches = failedPatches,
+                     stepResults = stepResults,
