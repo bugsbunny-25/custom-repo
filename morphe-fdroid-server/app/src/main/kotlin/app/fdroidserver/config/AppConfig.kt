@@ -1,5 +1,6 @@
 package app.fdroidserver.config
 
+import app.morphe.engine.patches.RemotePatchSourceFactory
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.jetbrains.exposed.v1.core.SortOrder
@@ -301,11 +302,16 @@ class AppConfig(private val db: AppDatabase) {
         val file: String,
         val version: String,
         val updatedAt: String,
-        // Blank githubRepo means this entry is manually managed (uploaded
-        // .mpp files); a non-blank "owner/repo" opts it into
-        // PatchLibraryGithubScheduler's automatic download/import instead.
-        val githubRepo: String = "",
-        val githubIncludePrereleases: Boolean = false,
+        // Blank sourceUrl means this entry is manually managed (uploaded .mpp
+        // files); a repo URL opts it into PatchSourceScheduler's automatic
+        // download/import instead. Any URL the vendored engine's
+        // RemotePatchSourceFactory can parse works - GitHub or GitLab.
+        val sourceUrl: String = "",
+        // Display-only, derived from sourceUrl ("github"/"gitlab", blank when
+        // there's no source or it can't be parsed) so the admin UI can label
+        // an entry without re-implementing URL parsing in JS.
+        val sourceProvider: String = "",
+        val includePrereleases: Boolean = false,
     )
 
     @Serializable
@@ -317,23 +323,37 @@ class AppConfig(private val db: AppDatabase) {
         val contentBase64: String? = null,
         // Nullable (rather than defaulting to ""/false) so PUT can
         // distinguish "not provided, don't change" from "explicitly cleared".
+        val sourceUrl: String? = null,
+        val includePrereleases: Boolean? = null,
+        // Accepted for compatibility with clients written against the
+        // GitHub-only API (a bare "owner/repo"). Ignored when sourceUrl is
+        // given; see [resolvedSourceUrl].
         val githubRepo: String? = null,
-        val githubIncludePrereleases: Boolean? = null,
-    )
+    ) {
+        /** [sourceUrl] if given, otherwise the legacy [githubRepo] expanded to
+         * the GitHub URL it always meant. Null when neither was provided. */
+        val resolvedSourceUrl: String?
+            get() = sourceUrl ?: githubRepo?.let { repo ->
+                repo.trim().let { if (it.isBlank()) "" else "https://github.com/$it" }
+            }
+    }
 
     private fun patchLibraryRowToView(
         schema: PatchSchema,
         row: org.jetbrains.exposed.v1.core.ResultRow
-    ): PatchLibraryEntryView =
-        PatchLibraryEntryView(
+    ): PatchLibraryEntryView {
+        val sourceUrl = row[schema.library.sourceUrl]
+        return PatchLibraryEntryView(
             id = row[schema.library.id],
             name = row[schema.library.name],
             file = row[schema.library.file],
             version = row[schema.library.version],
             updatedAt = row[schema.library.updatedAt],
-            githubRepo = row[schema.library.githubRepo],
-            githubIncludePrereleases = row[schema.library.githubIncludePrereleases],
+            sourceUrl = sourceUrl,
+            sourceProvider = RemotePatchSourceFactory.parse(sourceUrl)?.provider?.name?.lowercase().orEmpty(),
+            includePrereleases = row[schema.library.includePrereleases],
         )
+    }
 
     suspend fun listPatchLibrary(schema: PatchSchema): List<PatchLibraryEntryView> = db.tx {
         schema.library.selectAll().map { patchLibraryRowToView(schema, it) }
@@ -344,33 +364,42 @@ class AppConfig(private val db: AppDatabase) {
         id: String,
         name: String,
         fileName: String,
-        githubRepo: String = "",
-        githubIncludePrereleases: Boolean = false,
+        sourceUrl: String = "",
+        includePrereleases: Boolean = false,
     ): Result<PatchLibraryEntryView> = db.tx {
         if (!isValidSlug(id)) return@tx Result.Error("A valid id (letters, numbers, - and _ only) is required")
         if (schema.library.selectAll().where { schema.library.id eq id }.any()) {
             return@tx Result.Error("A patch with id \"$id\" already exists")
         }
+        // Store the canonical form the engine parsed out (e.g. a pasted
+        // "github.com/owner/repo/releases/tag/v1" becomes
+        // "https://github.com/owner/repo") so the stored value round-trips
+        // through RemotePatchSourceFactory unchanged on every later read.
+        val parsed = RemotePatchSourceFactory.parse(sourceUrl)
+        if (sourceUrl.isNotBlank() && parsed == null) {
+            return@tx Result.Error("\"$sourceUrl\" is not a GitHub or GitLab repo URL")
+        }
+        val canonicalUrl = parsed?.canonicalUrl.orEmpty()
         val updatedAt = now()
-        val repo = githubRepo.trim()
         schema.library.insert {
             it[schema.library.id] = id
             it[schema.library.name] = name.ifBlank { id }
             it[file] = fileName
             it[version] = ""
-            it[schema.library.githubRepo] = repo
-            it[schema.library.githubIncludePrereleases] = githubIncludePrereleases
+            it[schema.library.sourceUrl] = canonicalUrl
+            it[schema.library.includePrereleases] = includePrereleases
             it[schema.library.updatedAt] = updatedAt
         }
         Result.Ok(
             PatchLibraryEntryView(
-                id,
-                name.ifBlank { id },
-                fileName,
-                "",
-                updatedAt,
-                repo,
-                githubIncludePrereleases
+                id = id,
+                name = name.ifBlank { id },
+                file = fileName,
+                version = "",
+                updatedAt = updatedAt,
+                sourceUrl = canonicalUrl,
+                sourceProvider = parsed?.provider?.name?.lowercase().orEmpty(),
+                includePrereleases = includePrereleases,
             )
         )
     }
@@ -383,56 +412,73 @@ class AppConfig(private val db: AppDatabase) {
         newName: String?,
         newVersion: String?,
         newFileName: String?,
-        newGithubRepo: String? = null,
-        newGithubIncludePrereleases: Boolean? = null,
+        newSourceUrl: String? = null,
+        newIncludePrereleases: Boolean? = null,
     ): Result<PatchLibraryUpdateResult> = db.tx {
         val existing = schema.library.selectAll().where { schema.library.id eq id }.singleOrNull()
             ?: return@tx Result.Error("Patch not found")
+
+        // Blank clears the source (back to manual uploads); anything else has
+        // to parse, so a typo can't silently disable auto-updates.
+        val canonicalUrl = newSourceUrl?.let { raw ->
+            if (raw.isBlank()) {
+                ""
+            } else {
+                RemotePatchSourceFactory.parse(raw)?.canonicalUrl
+                    ?: return@tx Result.Error("\"$raw\" is not a GitHub or GitLab repo URL")
+            }
+        }
 
         val contentUpdated = newFileName != null
         schema.library.update({ schema.library.id eq id }) {
             if (newName != null) it[name] = newName.ifBlank { id }
             if (newVersion != null) it[version] = newVersion
             if (newFileName != null) it[file] = newFileName
-            if (newGithubRepo != null) it[githubRepo] = newGithubRepo.trim()
-            if (newGithubIncludePrereleases != null) it[githubIncludePrereleases] = newGithubIncludePrereleases
+            if (canonicalUrl != null) it[sourceUrl] = canonicalUrl
+            if (newIncludePrereleases != null) it[includePrereleases] = newIncludePrereleases
             it[updatedAt] = now()
         }
         val updatedRow = schema.library.selectAll().where { schema.library.id eq id }.single()
         Result.Ok(PatchLibraryUpdateResult(patchLibraryRowToView(schema, updatedRow), contentUpdated))
     }
 
-    /** Entries opted into [app.fdroidserver.patching.PatchLibraryGithubScheduler]'s
-     * automatic download (non-blank `github_repo`). */
-    data class PatchLibraryGithubEntry(
+    /** Entries opted into [app.fdroidserver.patching.PatchSourceScheduler]'s
+     * automatic download (non-blank `source_url`). */
+    data class PatchLibrarySourceEntry(
         val id: String,
-        val githubRepo: String,
-        val githubIncludePrereleases: Boolean,
-        val githubLastReleaseId: String,
+        val sourceUrl: String,
+        val includePrereleases: Boolean,
+        /** Tag of the release last imported for this entry - what stops the
+         * same release being re-downloaded on every poll. Named after the
+         * column it lives in, which predates GitLab support (GitLab keys
+         * releases by tag, not by a numeric id, so the tag is the one
+         * identifier both providers share). */
+        val lastReleaseId: String,
     )
 
-    suspend fun listPatchLibraryWithGithubRepo(schema: PatchSchema): List<PatchLibraryGithubEntry> = db.tx {
+    suspend fun listPatchLibrarySources(schema: PatchSchema): List<PatchLibrarySourceEntry> = db.tx {
         schema.library.selectAll().mapNotNull { row ->
-            val repo = row[schema.library.githubRepo]
-            if (repo.isBlank()) return@mapNotNull null
-            PatchLibraryGithubEntry(
+            val url = row[schema.library.sourceUrl]
+            if (url.isBlank()) return@mapNotNull null
+            PatchLibrarySourceEntry(
                 id = row[schema.library.id],
-                githubRepo = repo,
-                githubIncludePrereleases = row[schema.library.githubIncludePrereleases],
-                githubLastReleaseId = row[schema.library.githubLastReleaseId],
+                sourceUrl = url,
+                includePrereleases = row[schema.library.includePrereleases],
+                lastReleaseId = row[schema.library.lastReleaseId],
             )
         }
     }
 
-    /** Records a successful automatic `.mpp` download/import from GitHub for
-     * [id] - the auto-update counterpart to [updatePatchInLibrary], called by
-     * [app.fdroidserver.patching.PatchLibraryGithubScheduler] after it
+    /** Records a successful automatic `.mpp` download/import from a remote
+     * patch source for [id] - the auto-update counterpart to
+     * [updatePatchInLibrary], called by
+     * [app.fdroidserver.patching.PatchSourceScheduler] after it
      * downloads a new release's `.mpp` asset. Always treated as a content
      * update (unlike [updatePatchInLibrary], which only resets
      * customizations/cache when a new file was actually uploaded) - the
      * caller is expected to follow up with [resetPatchCustomizations] and
      * [invalidatePatchCache], same as a manual file update via the admin UI. */
-    suspend fun recordPatchLibraryGithubUpdate(
+    suspend fun recordPatchLibrarySourceUpdate(
         schema: PatchSchema,
         id: String,
         version: String,
@@ -445,7 +491,7 @@ class AppConfig(private val db: AppDatabase) {
         schema.library.update({ schema.library.id eq id }) {
             it[file] = fileName
             it[schema.library.version] = version
-            it[githubLastReleaseId] = releaseId
+            it[lastReleaseId] = releaseId
             it[updatedAt] = now()
         }
         val updatedRow = schema.library.selectAll().where { schema.library.id eq id }.single()

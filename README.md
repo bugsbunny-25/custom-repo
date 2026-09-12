@@ -5,6 +5,8 @@ A Docker-based F-Droid repository server that automatically monitors GitHub rele
 ## Features
 
 - 🔄 Automatic monitoring of GitHub releases for APK files
+- 🩹 Patches APKs with Morphe using the official desktop app's engine, and
+  auto-updates `.mpp` patch bundles from GitHub or GitLab
 - 📦 Serves a complete F-Droid repository
 - 🕐 Configurable update interval
 - 🔐 Support for private repos via GitHub tokens
@@ -162,11 +164,23 @@ The admin UI at `/admin` has three tabs:
 
 The whole server (admin UI, GitHub release checker, APKMirror scraper, and
 patch pipeline) is a single Kotlin/JVM application
-(`morphe-fdroid-server/`) that calls the
-[morphe-patcher](https://github.com/MorpheApp/morphe-patcher) library
-directly — there's no external Morphe CLI process, no command templates, and
-no jars to auto-download. `fdroidserver` (the `fdroid` CLI) is the only
-remaining Python dependency, used only to generate/sign the repo index.
+(`morphe-fdroid-server/`) — there's no external Morphe CLI process, no
+command templates, and no jars to auto-download. `fdroidserver` (the `fdroid`
+CLI) is the only remaining Python dependency, used only to generate/sign the
+repo index.
+
+Everything Morphe-specific — applying patches to an APK, and fetching patch
+bundles from GitHub and GitLab — is done by the **engine from the official
+[Morphe desktop app](https://github.com/MorpheApp/morphe-desktop)**, vendored
+into this repo at
+[`morphe-fdroid-server/app/src/main/kotlin/app/morphe/engine/`](morphe-fdroid-server/app/src/main/kotlin/app/morphe/engine/)
+(morphe-desktop ships no library artifact to depend on; see that directory's
+`README.md` for what was taken, what was left behind, and how to re-sync). So
+this server patches the way the desktop app patches: the same bundle merging,
+the same compatibility filtering, the same option handling, the same signing
+fallback, and the same remote-source endpoints. It calls
+[morphe-patcher](https://github.com/MorpheApp/morphe-patcher) through that
+engine, pinned to the version morphe-desktop itself pins.
 
 ### APK bundles (.apkm/.xapk/.apks)
 
@@ -189,11 +203,46 @@ and resets any per-app sub-patch/option overrides, so the next check
 re-patches with the new version's defaults.
 
 Each library patch also has a **"View Packages"** button that inspects the
-`.mpp` file directly (via `loadPatchesFromJar`) and shows, for every
+`.mpp` file directly (loading it through the engine's patch bundle loader,
+the same way the desktop app does) and shows, for every
 individual patch inside it, its name/description and which app package(s)
 and version(s) it supports (a single `.mpp` can bundle multiple named
 patches with different compatible packages, like a ReVanced patch bundle).
 This is read live from the file each time — nothing is cached.
+
+### Auto-updating patches from GitHub or GitLab
+
+Instead of uploading a new `.mpp` by hand every time one is cut, a library
+entry can be pointed at the repo that publishes it. Set **Patch source** on
+the entry to a repo URL — `https://github.com/owner/repo` or
+`https://gitlab.com/owner/repo` — and the server keeps it up to date on the
+same schedule as the patch checks. An entry with a source and no file yet is
+valid: the first check downloads it.
+
+Both providers are handled by the vendored engine's own remote-source code,
+so this matches the desktop app exactly:
+
+- The latest version is resolved from the repo's `patches-bundle.json` on the
+  raw CDN first (`main` for stable, `dev` when **Include pre-releases** is
+  ticked), which costs nothing against either provider's rate-limited release
+  API. Repos that don't publish that manifest fall back to the release list,
+  where drafts are always skipped and pre-releases are skipped unless the
+  entry opted in.
+- A release carrying several `.mpp` assets (some repos keep older ones
+  alongside the current one) is resolved by matching the release tag, falling
+  back to the first asset with a warning in the logs.
+- A bundle built against a **newer morphe-patcher than this server ships** is
+  refused before it replaces the working one, with the same "needs patcher X,
+  this build ships Y" message the desktop app shows — rather than being
+  installed and turning every later patch run into a link error.
+
+Importing a new `.mpp` has exactly the same consequences as re-uploading one
+by hand: cached results are invalidated and per-app overrides are reset.
+**"Check source now"** on an entry runs the check immediately.
+
+The GitHub token from the Settings tab (the same one the GitHub tab uses)
+raises the rate limit for GitHub-hosted sources. It is attached to GitHub
+hosts only, never to GitLab.
 
 ### Per-app sub-patch and option overrides
 
@@ -213,13 +262,24 @@ You can:
 Only the fields you actually change are saved as overrides
 (`patch_selection` / `option_overrides` on that attachment in the database);
 everything else keeps following the `.mpp`'s own defaults. These overrides
-are applied in-process by setting each `Patch`/`Option`'s value directly
-before running the patcher — no shell flags involved.
+are applied in-process: the selection becomes the engine's enabled/disabled
+patch sets, and each option string is converted to the option's real declared
+type before being handed to morphe-patcher's own `setOptions` — no shell
+flags involved.
+
+Note that the engine also filters patches by **app version**: a sub-patch
+that declares support for specific versions of the target app is skipped for
+other versions, exactly as it is in the desktop app. That check is bypassed
+when the version being patched was chosen deliberately — a pinned
+`supported_versions` entry, or the "Patch Specific Version" button — since
+that is an explicit request for that version.
 
 ### Setting it up
 
 1. **Upload a patch** in the Patching tab's Patch Library: an id, display
-   name, the `.mpp` file, and an optional version label.
+   name, the `.mpp` file, and an optional version label. Or skip the file and
+   set a **Patch source** URL instead (see above) to have it downloaded and
+   kept up to date automatically.
 
 2. **Add a patch target**: a display name, the APKMirror app page URL, and
    (optionally) the expected package name.

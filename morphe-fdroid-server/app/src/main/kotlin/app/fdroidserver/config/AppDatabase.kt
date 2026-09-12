@@ -3,6 +3,7 @@ package app.fdroidserver.config
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import org.jetbrains.exposed.v1.jdbc.Database
+import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 import org.jetbrains.exposed.v1.jdbc.SchemaUtils
 import org.jetbrains.exposed.v1.jdbc.insert
 import org.jetbrains.exposed.v1.jdbc.selectAll
@@ -52,6 +53,36 @@ class AppDatabase(dbDir: File) {
             if (Settings.selectAll().empty()) {
                 Settings.insert { it[id] = 1 }
             }
+            backfillPatchLibrarySourceUrls()
+        }
+    }
+
+    /**
+     * One-time migration of the patch library's pre-GitLab `github_repo`
+     * column (a bare "owner/repo") into the provider-agnostic `source_url`
+     * added alongside it.
+     *
+     * Written as raw SQL rather than an Exposed update because it has to run
+     * in the same transaction that just created the column, and because it is
+     * a pure data move with no model behind it. Idempotent: it only touches
+     * rows whose `source_url` is still empty, so it's a no-op on every start
+     * after the first and can never overwrite a URL the operator has since
+     * set (including one pointing at GitLab).
+     *
+     * The old column is left in place and unread afterwards - see
+     * [PatchLibrarySchema] for why nothing here is renamed or dropped.
+     */
+    private fun JdbcTransaction.backfillPatchLibrarySourceUrls() {
+        for (table in listOf(PatchLibraryTable.tableName, PatchLibraryTableTv.tableName)) {
+            exec(
+                """
+                UPDATE $table
+                   SET source_url = 'https://github.com/' || github_repo
+                 WHERE (source_url IS NULL OR source_url = '')
+                   AND github_repo IS NOT NULL
+                   AND github_repo != ''
+                """.trimIndent(),
+            )
         }
     }
 

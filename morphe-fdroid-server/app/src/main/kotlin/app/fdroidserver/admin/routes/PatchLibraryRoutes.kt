@@ -2,12 +2,13 @@ package app.fdroidserver.admin.routes
 
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.patching.PatchLibrary
-import app.fdroidserver.patching.PatchLibraryGithubScheduler
+import app.fdroidserver.patching.PatchSourceScheduler
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
+import io.ktor.server.routing.RoutingContext
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -26,7 +27,7 @@ data class PatchOkResponse(val ok: Boolean = true, val patch: AppConfig.PatchLib
 data class InspectResponse(val patchId: String, val patches: List<PatchLibrary.PatchInfo>)
 
 @Serializable
-data class GithubCheckResponse(val ok: Boolean = true, val updated: Boolean)
+data class SourceCheckResponse(val ok: Boolean = true, val updated: Boolean)
 
 /** The Patching tab's "Patch Library" API - upload/update/delete `.mpp`
  * files and introspect them, matching the Python version's
@@ -35,15 +36,17 @@ data class GithubCheckResponse(val ok: Boolean = true, val updated: Boolean)
  * "Patched TV" tabs get fully independent libraries.
  *
  * A library entry no longer strictly needs an uploaded `.mpp`: if
- * `github_repo` is set (with no file yet), [patchLibraryGithubScheduler]'s
- * scheduled sweep (or the "Check GitHub now" button, via this route's
- * `/{id}/check-github`) downloads it from that repo's releases instead. */
+ * `source_url` is set (with no file yet), [patchSourceScheduler]'s scheduled
+ * sweep (or the "Check source now" button, via this route's
+ * `/{id}/check-source`) downloads it from that repo's releases instead. The
+ * URL can point at GitHub or GitLab - whatever the vendored engine's
+ * `RemotePatchSourceFactory` can parse. */
 fun Route.patchLibraryRoutes(
     appConfig: AppConfig,
     patchLibrary: PatchLibrary,
     patchesDir: File,
     schema: AppConfig.PatchSchema,
-    patchLibraryGithubScheduler: PatchLibraryGithubScheduler,
+    patchSourceScheduler: PatchSourceScheduler,
     basePath: String = "/api/patch-library",
 ) {
     get(basePath) {
@@ -58,14 +61,14 @@ fun Route.patchLibraryRoutes(
         }
         val filename = payload.filename
         val contentBase64 = payload.contentBase64
-        val githubRepo = payload.githubRepo?.trim().orEmpty()
+        val sourceUrl = payload.resolvedSourceUrl?.trim().orEmpty()
         val hasUploadedFile = !filename.isNullOrBlank() && !contentBase64.isNullOrBlank()
-        // Either an uploaded .mpp or a github_repo to auto-download one from
-        // is required - but not both; a github_repo-only entry starts out
-        // with no file on disk until the next scheduled (or manually
-        // triggered) GitHub check imports one.
-        if (!hasUploadedFile && githubRepo.isBlank()) {
-            call.respond(HttpStatusCode.BadRequest, ErrorResponse("A .mpp file or a GitHub repo is required"))
+        // Either an uploaded .mpp or a source_url to auto-download one from
+        // is required - but not both; a source-only entry starts out with no
+        // file on disk until the next scheduled (or manually triggered)
+        // source check imports one.
+        if (!hasUploadedFile && sourceUrl.isBlank()) {
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("A .mpp file or a GitHub/GitLab repo URL is required"))
             return@post
         }
 
@@ -83,8 +86,8 @@ fun Route.patchLibraryRoutes(
 
         val result = appConfig.addPatchToLibrary(
             schema, payload.id, payload.name, storedName,
-            githubRepo = githubRepo,
-            githubIncludePrereleases = payload.githubIncludePrereleases ?: false,
+            sourceUrl = sourceUrl,
+            includePrereleases = payload.includePrereleases ?: false,
         )
         when (result) {
             is AppConfig.Result.Error -> call.respond(HttpStatusCode.BadRequest, ErrorResponse(result.message))
@@ -120,8 +123,8 @@ fun Route.patchLibraryRoutes(
         val newFileName = if (bytesToWrite != null) (existing?.file?.ifBlank { "$id.mpp" } ?: "$id.mpp") else null
         val updateResult = appConfig.updatePatchInLibrary(
             schema, id, payload.name, payload.version, newFileName,
-            newGithubRepo = payload.githubRepo,
-            newGithubIncludePrereleases = payload.githubIncludePrereleases,
+            newSourceUrl = payload.resolvedSourceUrl,
+            newIncludePrereleases = payload.includePrereleases,
         )
         if (updateResult is AppConfig.Result.Ok && updateResult.value.contentUpdated) {
             appConfig.resetPatchCustomizations(schema, id)
@@ -158,19 +161,25 @@ fun Route.patchLibraryRoutes(
         }
     }
 
-    // "Check GitHub now" button - runs the same auto-update check as the
+    // "Check source now" button - runs the same auto-update check as the
     // scheduled background sweep, synchronously, for one entry - only
-    // meaningful for entries with a github_repo configured (returns
+    // meaningful for entries with a source_url configured (returns
     // updated=false for anything else, same as "no newer release found").
-    post("$basePath/{id}/check-github") {
+    //
+    // Registered under both paths: /check-source is the name that matches what
+    // it now does (GitHub or GitLab), /check-github is what the route was
+    // called when only GitHub was supported and is kept so anything scripted
+    // against it keeps working.
+    val checkSource: suspend RoutingContext.() -> Unit = {
         val id = call.parameters["id"]
         if (id == null) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid patch id"))
-            return@post
+        } else {
+            call.respond(SourceCheckResponse(updated = patchSourceScheduler.checkEntryNow(id)))
         }
-        val updated = patchLibraryGithubScheduler.checkEntryNow(id)
-        call.respond(GithubCheckResponse(updated = updated))
     }
+    post("$basePath/{id}/check-source") { checkSource() }
+    post("$basePath/{id}/check-github") { checkSource() }
 
     get("$basePath/{id}/inspect") {
         val id = call.parameters["id"]

@@ -9,7 +9,7 @@ import app.fdroidserver.config.AppConfig
 import app.fdroidserver.config.AppConfig.PatchSchemas
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
 import app.fdroidserver.patching.PatchLibrary
-import app.fdroidserver.patching.PatchLibraryGithubScheduler
+import app.fdroidserver.patching.PatchSourceScheduler
 import app.fdroidserver.patching.PatchScheduler
 import io.ktor.http.ContentType
 import io.ktor.serialization.kotlinx.json.json
@@ -56,11 +56,11 @@ class AdminServer(
     private val repoDir: File,
     private val patchedRepoDir: File,
     private val patchScheduler: PatchScheduler,
-    private val patchLibraryGithubScheduler: PatchLibraryGithubScheduler,
+    private val patchSourceScheduler: PatchSourceScheduler,
     private val patchesTvDir: File,
     private val patchedTvRepoDir: File,
     private val patchSchedulerTv: PatchScheduler,
-    private val patchLibraryGithubSchedulerTv: PatchLibraryGithubScheduler,
+    private val patchSourceSchedulerTv: PatchSourceScheduler,
     private val host: String = "0.0.0.0",
     private val port: Int = 5001,
 ) {
@@ -117,8 +117,8 @@ class AdminServer(
             setupRoutes(appConfig, fdroidRepoManager, repoDir, patchedRepoDir, patchedTvRepoDir)
             settingsRoutes(appConfig, fdroidRepoManager, repoDir, patchedRepoDir, patchedTvRepoDir)
             repoRoutes(appConfig)
-            patchLibraryRoutes(appConfig, patchLibrary, patchesDir, PatchSchemas.Mobile, patchLibraryGithubScheduler, basePath = "/api/patch-library")
-            patchLibraryRoutes(appConfig, patchLibrary, patchesTvDir, PatchSchemas.Tv, patchLibraryGithubSchedulerTv, basePath = "/api/patch-library-tv")
+            patchLibraryRoutes(appConfig, patchLibrary, patchesDir, PatchSchemas.Mobile, patchSourceScheduler, basePath = "/api/patch-library")
+            patchLibraryRoutes(appConfig, patchLibrary, patchesTvDir, PatchSchemas.Tv, patchSourceSchedulerTv, basePath = "/api/patch-library-tv")
             patchTargetRoutes(appConfig, patchScheduler, PatchSchemas.Mobile, basePath = "/api/patch-targets")
             patchTargetRoutes(appConfig, patchSchedulerTv, PatchSchemas.Tv, basePath = "/api/patch-targets-tv")
         }

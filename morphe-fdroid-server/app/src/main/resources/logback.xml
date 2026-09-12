@@ -1,6 +1,19 @@
 <configuration>
     <property name="LOG_LEVEL" value="${LOG_LEVEL:-INFO}" />
 
+    <!--
+      Pushes logback's levels onto java.util.logging, so LOG_LEVEL also
+      controls what the vendored app.morphe.engine package and morphe-patcher
+      emit (both log through JUL - see app.fdroidserver.LoggingBridge, which
+      installs the JUL -> SLF4J handler). Without this, JUL keeps its own
+      default INFO threshold and filters records out before the bridge ever
+      sees them, so LOG_LEVEL=DEBUG would silently show nothing extra from the
+      patching pipeline. resetJUL also drops JUL's default console handler.
+    -->
+    <contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
+        <resetJUL>true</resetJUL>
+    </contextListener>
+
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
