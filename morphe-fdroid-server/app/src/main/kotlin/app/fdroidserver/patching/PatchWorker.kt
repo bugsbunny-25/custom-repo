@@ -144,13 +144,18 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
                 return PatchApplier.ApplyResult.Failure(null, RuntimeException("patch worker timed out after 20 minutes"))
             }
 
-            if (!responseFile.exists()) {
-                return PatchApplier.ApplyResult.Failure(
-                    null,
-                    RuntimeException("patch worker exited with code ${process.exitValue()} and wrote no response"),
-                )
+            // The response file is created empty up front (see
+            // createRestrictedTempFile), so "does it exist" says nothing about
+            // whether the worker got far enough to write a result - check the
+            // content. A worker that dies without writing one leaves this blank,
+            // and decoding that raised a JsonDecodingException about an
+            // unexpected EOF, which told the operator nothing about what
+            // actually happened.
+            val responseJson = runCatching { responseFile.readText() }.getOrDefault("")
+            if (responseJson.isBlank()) {
+                return PatchApplier.ApplyResult.Failure(null, RuntimeException(workerDiedMessage(process.exitValue())))
             }
-            val response = json.decodeFromString<PatchWorkerResponse>(responseFile.readText())
+            val response = json.decodeFromString<PatchWorkerResponse>(responseJson)
             if (response.success) {
                 PatchApplier.ApplyResult.Success(
                     response.packageName ?: "",
@@ -166,6 +171,27 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
         } finally {
             requestFile.delete()
             responseFile.delete()
+        }
+    }
+
+    /**
+     * Explains a worker that exited without writing a response.
+     *
+     * Memory is the usual cause and the two shapes look nothing alike in the
+     * logs, so they're named explicitly. 137 is SIGKILL, which for a container
+     * with a memory limit means the kernel's OOM killer took the worker
+     * because the *container* ran out. A plain non-zero exit is usually the
+     * JVM itself throwing OutOfMemoryError because its own heap - 25% of what
+     * it can see, by default - was too small, which can happen with the
+     * container nowhere near its limit.
+     */
+    private fun workerDiedMessage(exitCode: Int): String = buildString {
+        append("patch worker exited with code $exitCode without writing a response")
+        when {
+            exitCode == 137 || exitCode == 128 + 9 ->
+                append(" - killed by SIGKILL, which normally means the container hit its memory limit")
+            exitCode != 0 ->
+                append(" - check the worker's output above for OutOfMemoryError (the JVM's own heap, not the container limit)")
         }
     }
 

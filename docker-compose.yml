@@ -14,10 +14,19 @@ services:
     #
     # mem_limit is the one place worth setting if you want a ceiling: the JVM
     # reads the cgroup limit, so one value here bounds both processes instead
-    # of hard-coding heap sizes per process. Pick it from your host's headroom
-    # and leave room for a patch run - its peak depends on APK size and the
-    # patches applied, so profile a real run rather than guessing, and note
-    # that a limit too low turns a patch run into an OOM kill.
+    # of hard-coding heap sizes per process.
+    #
+    # Careful with the number. With no -Xmx a JVM takes 25% of what it can see,
+    # so a limit is roughly 4x the usable heap: mem_limit 1g gives the patcher a
+    # 256m heap and a YouTube-class patch dies of OutOfMemoryError with the
+    # container still ~140 MiB short of full. Measured on YouTube 21.36.45 with
+    # 81 patches: 2g works, 1.5g fails, worker RSS peaks at ~1.76 GiB when given
+    # room. 3g is the comfortable choice.
+    #
+    # See README.md "Memory and resource limits" for the full measurements,
+    # both failure modes, and how to shrink only the admin server's idle
+    # footprint without starving patch runs.
+    # mem_limit: 3g
 
     volumes:
       # Persist the F-Droid repository data
