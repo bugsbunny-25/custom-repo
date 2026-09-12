@@ -77,25 +77,35 @@ object GithubCheckedReleases : Table("github_checked_releases") {
  * "Patched" and "Patched TV" tabs (see [PatchSchema]) each get their own
  * table/data with zero duplicated column definitions.
  *
- * `github_repo` (owner/repo, blank = disabled) lets a library entry's
- * `.mpp` be kept up to date automatically instead of manually uploaded:
- * [app.fdroidserver.patching.PatchLibraryGithubScheduler] polls that repo's
- * releases for a new `.mpp` asset and downloads/imports it in place of a
- * manual upload. `github_include_prereleases` mirrors [GithubRepos]'
- * per-repo override of the same name. `github_last_release_id` is the last
- * release id that was actually imported, so a release that's already been
- * imported isn't re-downloaded every poll (added after the others, so
- * existing databases pick it up via `createMissingTablesAndColumns`'s ALTER
- * TABLE). */
+ * `source_url` (blank = disabled) lets a library entry's `.mpp` be kept up to
+ * date automatically instead of manually uploaded:
+ * [app.fdroidserver.patching.PatchSourceScheduler] polls that repo for a new
+ * `.mpp` release and downloads/imports it in place of a manual upload. It is a
+ * repo URL on any provider the vendored engine's
+ * [app.morphe.engine.patches.RemotePatchSourceFactory] understands - today
+ * `https://github.com/owner/repo` or `https://gitlab.com/owner/repo`.
+ *
+ * The two `github_*` columns predate GitLab support and are provider-agnostic
+ * despite their names; they are deliberately NOT renamed, because Exposed's
+ * `createMissingTablesAndColumns` only ever ADDs columns - a rename would
+ * silently create empty new columns next to the populated old ones and lose
+ * every entry's "already imported this release" marker. `github_repo` is the
+ * pre-`source_url` storage (bare "owner/repo", GitHub only); [AppDatabase]
+ * backfills `source_url` from it once on startup and nothing writes it after
+ * that.
+ */
 open class PatchLibrarySchema(name: String) : Table(name) {
     val id = varchar("id", 255)
     val name = varchar("name", 255).default("")
     val file = varchar("file", 255).default("")
     val version = varchar("version", 64).default("")
     val updatedAt = varchar("updated_at", 64).default("")
-    val githubRepo = varchar("github_repo", 255).default("")
-    val githubIncludePrereleases = bool("github_include_prereleases").default(false)
-    val githubLastReleaseId = varchar("github_last_release_id", 128).default("")
+    val sourceUrl = varchar("source_url", 512).default("")
+    /** Legacy pre-`source_url` GitHub "owner/repo". Read once by [AppDatabase]'s
+     * backfill; never written. */
+    val legacyGithubRepo = varchar("github_repo", 255).default("")
+    val includePrereleases = bool("github_include_prereleases").default(false)
+    val lastReleaseId = varchar("github_last_release_id", 128).default("")
 
     override val primaryKey = PrimaryKey(id)
 }

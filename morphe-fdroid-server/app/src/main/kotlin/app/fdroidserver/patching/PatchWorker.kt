@@ -1,5 +1,6 @@
 package app.fdroidserver.patching
 
+import app.fdroidserver.LoggingBridge
 import app.fdroidserver.apkmirror.ApkMirrorClient
 import app.fdroidserver.apkpure.ApkPureClient
 import app.fdroidserver.scraper.ScraperClient
@@ -19,8 +20,10 @@ private val json = Json { ignoreUnknownKeys = true }
  * needed to go from a version page URL all the way to a signed, patched APK:
  * resolving + downloading the APK, merging it if it's a split bundle, and
  * running [PatchApplier]. [patchSelection]/[optionOverrides] stand in for an
- * already-loaded `Set<Patch<*>>` (not JSON-serializable) - the worker
- * rebuilds it itself from [patchFile] via [PatchSelector.applyOverrides].
+ * already-loaded `Set<Patch<*>>` (not JSON-serializable) - the worker loads
+ * the bundle itself from [patchFile] and hands both maps to [PatchApplier],
+ * which turns them into the vendored engine's enabled/disabled name sets and
+ * typed option map (see [PatchSelector]).
  */
 @Serializable
 private data class PatchWorkerRequest(
@@ -38,6 +41,10 @@ private data class PatchWorkerRequest(
     val patchSelection: Map<String, Boolean>,
     val optionOverrides: Map<String, Map<String, String>>,
     val packageName: String,
+    /** Bypasses the engine's app-version compatibility check - see
+     * [PatchApplier.apply]. Defaults to false so a request written by an
+     * older build still decodes. */
+    val forceCompatibility: Boolean = false,
     val outputApk: String,
     val workDir: String,
     val keystoreFile: String,
@@ -52,6 +59,10 @@ private data class PatchWorkerResponse(
     val success: Boolean,
     val packageName: String? = null,
     val versionName: String? = null,
+    /** Names of the patches the engine actually applied - logged by the
+     * scheduler so a run's contents are visible without the worker's own
+     * stdout. */
+    val appliedPatches: List<String> = emptyList(),
     val error: String? = null,
 )
 
@@ -92,6 +103,7 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
         outputApk: File,
         workDir: File,
         signing: PatchApplier.SigningConfig,
+        forceCompatibility: Boolean = false,
     ): PatchApplier.ApplyResult {
         workDir.mkdirs()
         val requestFile = createRestrictedTempFile("patch-worker-request", ".json")
@@ -109,6 +121,7 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
                         patchSelection = patchSelection,
                         optionOverrides = optionOverrides,
                         packageName = packageName,
+                        forceCompatibility = forceCompatibility,
                         outputApk = outputApk.absolutePath,
                         workDir = workDir.absolutePath,
                         keystoreFile = signing.keystoreFile.absolutePath,
@@ -138,7 +151,11 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
             }
             val response = json.decodeFromString<PatchWorkerResponse>(responseFile.readText())
             if (response.success) {
-                PatchApplier.ApplyResult.Success(response.packageName ?: "", response.versionName ?: "")
+                PatchApplier.ApplyResult.Success(
+                    response.packageName ?: "",
+                    response.versionName ?: "",
+                    response.appliedPatches,
+                )
             } else {
                 PatchApplier.ApplyResult.Failure(response.packageName, RuntimeException(response.error ?: "unknown patch worker failure"))
             }
@@ -172,6 +189,10 @@ object PatchWorkerEntryPoint {
     private val logger = LoggerFactory.getLogger(PatchWorkerEntryPoint::class.java.name)
 
     fun run(requestPath: String, responsePath: String): Int {
+        // Own JVM, so it has to install the bridge itself - this is where the
+        // engine and morphe-patcher actually run, and their JUL output is the
+        // only per-patch detail there is when a run fails.
+        LoggingBridge.install()
         val responseFile = File(responsePath)
         val request = try {
             json.decodeFromString<PatchWorkerRequest>(File(requestPath).readText())
@@ -225,13 +246,10 @@ object PatchWorkerEntryPoint {
         }
 
         val applier = PatchApplier()
+        // Patch filtering (defaults, package + app-version compatibility) and
+        // option typing now happen inside PatchApplier/the engine, so the whole
+        // loaded bundle is handed over as-is rather than pre-filtered here.
         val loadedPatches = applier.loadPatches(File(request.patchFile))
-        val patchesToApply = PatchSelector.applyOverrides(
-            loadedPatches,
-            request.patchSelection,
-            request.optionOverrides,
-            request.packageName,
-        )
         val signing = PatchApplier.SigningConfig(
             keystoreFile = File(request.keystoreFile),
             keystorePassword = request.keystorePassword,
@@ -241,14 +259,19 @@ object PatchWorkerEntryPoint {
         )
         return when (
             val result = applier.apply(
-                preparedApk,
-                patchesToApply,
-                File(request.outputApk),
-                workDir,
-                signing,
+                inputApk = preparedApk,
+                patches = loadedPatches,
+                selection = request.patchSelection,
+                optionOverrides = request.optionOverrides,
+                packageName = request.packageName,
+                outputApk = File(request.outputApk),
+                workDir = workDir,
+                signing = signing,
+                forceCompatibility = request.forceCompatibility,
             )
         ) {
-            is PatchApplier.ApplyResult.Success -> PatchWorkerResponse(true, result.packageName, result.versionName)
+            is PatchApplier.ApplyResult.Success ->
+                PatchWorkerResponse(true, result.packageName, result.versionName, result.appliedPatches)
             is PatchApplier.ApplyResult.Failure -> PatchWorkerResponse(false, result.packageName, error = result.error.toString())
         }
     }

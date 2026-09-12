@@ -1,5 +1,6 @@
 package app.fdroidserver.patching
 
+import app.morphe.engine.util.BundleFormats
 import app.morphe.patcher.apk.ApkMerger
 import app.morphe.patcher.logging.toMorpheLogger
 import java.io.File
@@ -39,9 +40,15 @@ class BundleMerger(private val logger: Logger = LoggerFactory.getLogger(BundleMe
      * inspecting zip entries for any nested `.apk`, since the download URLs
      * (APKMirror's `download.php`, APKPure's CDN links) don't always carry a
      * useful extension.
+     *
+     * The extension list itself comes from the vendored engine's
+     * [BundleFormats] so there's one definition of "bundle format" shared with
+     * [app.morphe.engine.PatchEngine] (which does the same check before its own
+     * merge step); the zip sniffing below is ours, because the engine only ever
+     * sees files that still have their original name.
      */
     fun isBundle(file: File): Boolean {
-        if (file.extension.lowercase() in BUNDLE_EXTENSIONS) return true
+        if (BundleFormats.isBundle(file)) return true
         return runCatching {
             ZipFile(file).use { zip ->
                 zip.entries().asSequence().any { entry ->
@@ -60,9 +67,5 @@ class BundleMerger(private val logger: Logger = LoggerFactory.getLogger(BundleMe
             outputFile = outputFile,
             cleanMetaInf = true,
         )
-    }
-
-    companion object {
-        private val BUNDLE_EXTENSIONS = setOf("apkm", "xapk", "apks")
     }
 }

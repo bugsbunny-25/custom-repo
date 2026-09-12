@@ -1,34 +1,27 @@
 package app.fdroidserver.patching
 
+import app.morphe.engine.PatchBundleIncompatibleException
+import app.morphe.engine.PatcherCompatibility
+import app.morphe.engine.compatibleVersionsForDisplay
+import app.morphe.engine.patches.PatchBundleLoader
+import app.morphe.engine.readableMessage
 import app.morphe.patcher.patch.Patch
-import app.morphe.patcher.patch.loadPatchesFromJar
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.io.File
 
 /**
- * Introspects `.mpp` patch files by calling morphe-patcher's
- * `loadPatchesFromJar` directly - no CLI, no text parsing. This is the
- * direct replacement for the old Python `morphe_inspect.py`, which shelled
- * out to `morphe-cli list-patches ...` and regex-parsed its stdout (a
- * process that had to be reverse-engineered more than once and was still
- * only a best-effort guess at the real output format). Calling the library
- * directly gets typed data with none of that fragility.
+ * Introspects `.mpp` patch files for the admin UI, by loading them through the
+ * vendored engine's [PatchBundleLoader] and reading the resulting typed
+ * `Patch` objects - no CLI, no text parsing.
  *
- * NOTE on API surface: coded against the `Patch`/`Option`/`Compatibility`
- * shape in morphe-patcher `1.7.0` (the version pinned in
- * `gradle/libs.versions.toml`): `Patch.default` (default-enabled flag) and
- * `Patch.compatibility` (`List<Compatibility>?`, each with a nullable
- * `packageName` and a list of `AppTarget`s carrying the version string).
- * 1.7.0 added typed `Option` subclasses (`ColorOption`, `FilePathOption`,
- * `FilesOption`, `FolderOption`, `ImageOption`) under `PathOptionsKt`; this
- * file only reads the base `Option` fields (`name`, `description`, `required`,
- * `default`, `type`, `values`) which are still present and non-deprecated.
- * `Option.title` was also added as a distinct UI-label field separate from
- * `name` (the identifier); both `key` (old deprecated identifier) and `use`
- * (old deprecated default flag) still exist as deprecated aliases.
- * When bumping the pinned version again, re-check whether
- * `default`/`compatibility`/`name` are still the current shape.
+ * Compatibility data is read via the engine's
+ * [compatibleVersionsForDisplay] extension rather than by walking
+ * `Patch.compatibility` by hand, so this agrees with what morphe-desktop shows
+ * for the same file - including its fallback to the deprecated
+ * `compatiblePackages` shape, which older `.mpp` bundles still use and which
+ * the hand-rolled version this replaces ignored entirely (such bundles showed
+ * up as "universal", i.e. compatible with every app).
  */
 class PatchLibrary {
 
@@ -73,47 +66,71 @@ class PatchLibrary {
     /**
      * Loads every patch inside [mppFiles] as typed metadata, for the admin
      * UI's "View Packages" (grouped by package, client-side) and "Configure"
-     * (filtered to one app's package_name, client-side) features. Those
-     * client-side behaviors are unchanged from the Python version - only the
-     * data source changed.
+     * (filtered to one app's package_name, client-side) features.
+     *
+     * A bundle built against a newer morphe-patcher than this build ships
+     * fails to load with a [java.lang.Error] (NoSuchMethodError /
+     * NoClassDefFoundError), which would escape a `catch (e: Exception)` in
+     * the callers and take down the request. Those are caught here and
+     * re-thrown as a [PatchBundleIncompatibleException] carrying the engine's
+     * user-facing "needs patcher X, this build ships Y" message, the same way
+     * morphe-desktop surfaces it.
      */
-    fun inspect(mppFiles: Set<File>): List<PatchInfo> =
-        loadPatchesFromJar(mppFiles).map { it.toPatchInfo() }
+    fun inspect(mppFiles: Set<File>): List<PatchInfo> = try {
+        PatchBundleLoader.loadFlat(mppFiles).map { it.toPatchInfo() }
+    } catch (t: Throwable) {
+        val incompatible = mppFiles.firstNotNullOfOrNull { PatcherCompatibility.incompatibilityMessage(it) }
+        if (incompatible != null) throw PatchBundleIncompatibleException(incompatible)
+        if (t is Exception) throw t
+        throw IllegalStateException(t.readableMessage(), t)
+    }
 
     fun inspect(mppFile: File): List<PatchInfo> = inspect(setOf(mppFile))
 
-    // Uses morphe-patcher's current (non-deprecated) shape: `Patch.default`,
-    // `Patch.compatibility` (a `List<Compatibility>` of per-package targets)
-    // and `Option.name`. minSdk and other AppTarget metadata is still
-    // dropped - only isExperimental is surfaced (see PackageInfo).
-    private fun Patch<*>.toPatchInfo(): PatchInfo = PatchInfo(
-        name = name,
-        description = description,
-        enabled = default,
-        packages = compatibility?.mapNotNull { compat ->
-            val packageName = compat.packageName ?: return@mapNotNull null
-            // A target with a null version means "any version" - matches
-            // the empty-list-means-any-version convention PackageInfo uses.
-            val versions = if (compat.targets.any { it.version == null }) {
-                emptyList()
-            } else {
-                compat.targets.map { it.version!! }
-            }
-            val experimentalVersions = compat.targets
-                .filter { it.isExperimental && it.version != null }
-                .map { it.version!! }
-            PackageInfo(packageName, versions, experimentalVersions)
-        } ?: emptyList(),
-        options = options.values.map { option ->
-            OptionInfo(
-                key = option.name,
-                title = option.name,
-                description = option.description,
-                required = option.required,
-                default = option.default?.toString(),
-                type = option.type.toString(),
-                possibleValues = option.values?.mapValues { it.value.toString() },
-            )
-        },
-    )
+    private fun Patch<*>.toPatchInfo(): PatchInfo {
+        // Two passes over the same data: everything, then only the
+        // non-experimental targets. The difference is the experimental set -
+        // the engine's helper doesn't expose the flag itself, only the
+        // filtered lists.
+        val allVersions = versionsByPackage(includeExperimental = true)
+        val stableVersions = versionsByPackage(includeExperimental = false)
+
+        return PatchInfo(
+            name = name,
+            description = description,
+            enabled = default,
+            packages = allVersions.map { (packageName, versions) ->
+                val stable = stableVersions[packageName].orEmpty().toSet()
+                PackageInfo(
+                    packageName = packageName,
+                    versions = versions,
+                    experimentalVersions = versions.filterNot { it in stable },
+                )
+            },
+            options = options.values.map { option ->
+                OptionInfo(
+                    key = option.name,
+                    title = option.name,
+                    description = option.description,
+                    required = option.required,
+                    default = option.default?.toString(),
+                    type = option.type.toString(),
+                    possibleValues = option.values?.mapValues { it.value.toString() },
+                )
+            },
+        )
+    }
+
+    /**
+     * Package name -> declared versions, merging the engine's per-compatibility-entry
+     * pairs (a patch can declare the same package more than once) and dropping
+     * universal entries, whose package name is null. An empty version list is
+     * kept as-is: it means "any version of this package", the convention
+     * [PackageInfo.versions] documents.
+     */
+    private fun Patch<*>.versionsByPackage(includeExperimental: Boolean): Map<String, List<String>> =
+        compatibleVersionsForDisplay(includeExperimental)
+            .mapNotNull { (packageName, versions) -> packageName?.let { it to versions } }
+            .groupBy({ it.first }, { it.second })
+            .mapValues { (_, versionLists) -> versionLists.flatten().distinct() }
 }

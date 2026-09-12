@@ -5,10 +5,9 @@ import app.fdroidserver.apkpure.ApkPureClient
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.config.AppDatabase
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
-import app.fdroidserver.github.GitHubReleaseChecker
 import app.fdroidserver.patching.PatchApplier
 import app.fdroidserver.patching.PatchLibrary
-import app.fdroidserver.patching.PatchLibraryGithubScheduler
+import app.fdroidserver.patching.PatchSourceScheduler
 import app.fdroidserver.patching.PatchScheduler
 import app.fdroidserver.patching.PatchWorkerLauncher
 import io.ktor.client.engine.cio.CIO
@@ -61,12 +60,11 @@ class AdminServerTest {
             PatchApplier.SigningConfig(keystoreFile = File(repoDir, "patched-tv-keystore.jks")),
             schema = AppConfig.PatchSchemas.Tv,
         )
-        val releaseChecker = GitHubReleaseChecker(HttpClient(CIO), githubToken = null)
-        val patchLibraryGithubScheduler = PatchLibraryGithubScheduler(appConfig, releaseChecker, patchesDir, AppConfig.PatchSchemas.Mobile)
-        val patchLibraryGithubSchedulerTv = PatchLibraryGithubScheduler(appConfig, releaseChecker, patchesTvDir, AppConfig.PatchSchemas.Tv)
+        val patchSourceScheduler = PatchSourceScheduler(appConfig, HttpClient(CIO), patchesDir, AppConfig.PatchSchemas.Mobile)
+        val patchSourceSchedulerTv = PatchSourceScheduler(appConfig, HttpClient(CIO), patchesTvDir, AppConfig.PatchSchemas.Tv)
         return AdminServer(
-            appConfig, PatchLibrary(), patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler, patchLibraryGithubScheduler,
-            patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchLibraryGithubSchedulerTv,
+            appConfig, PatchLibrary(), patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler, patchSourceScheduler,
+            patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchSourceSchedulerTv,
         )
     }
 
@@ -130,6 +128,43 @@ class AdminServerTest {
             val deleted = client.delete("/api/patch-library/yt-ads")
             assertEquals(HttpStatusCode.OK, deleted.status)
             assertTrue(!File(tempDir, "patches/yt-ads.mpp").exists())
+        }
+    }
+
+    @Test
+    fun `patch library entry can be created from a GitLab source URL with no uploaded file`(@TempDir tempDir: File) {
+        testApplication {
+            application { with(server(tempDir)) { configureServer() } }
+
+            val created = client.post("/api/patch-library") {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    """{"id":"yt-ads","name":"Block Ads",""" +
+                        """"source_url":"https://gitlab.com/someowner/somerepo/-/releases","include_prereleases":true}""",
+                )
+            }
+            assertEquals(HttpStatusCode.Created, created.status)
+
+            val body = client.get("/api/patch-library").bodyAsText()
+            // Stored canonicalized (the "/-/releases" suffix is dropped) and
+            // labelled with the provider the engine parsed out, which is what
+            // the admin UI renders in the "Patch source" column.
+            assertTrue(body.contains(""""source_url":"https://gitlab.com/someowner/somerepo""""), "got: $body")
+            assertTrue(body.contains(""""source_provider":"gitlab""""), "got: $body")
+            assertTrue(body.contains(""""include_prereleases":true"""), "got: $body")
+        }
+    }
+
+    @Test
+    fun `patch library rejects a source URL that is not a known provider`(@TempDir tempDir: File) {
+        testApplication {
+            application { with(server(tempDir)) { configureServer() } }
+
+            val created = client.post("/api/patch-library") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"id":"yt-ads","name":"Block Ads","source_url":"https://example.com/not-a-repo"}""")
+            }
+            assertEquals(HttpStatusCode.BadRequest, created.status)
         }
     }
 

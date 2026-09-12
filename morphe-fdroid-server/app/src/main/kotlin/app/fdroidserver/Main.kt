@@ -10,7 +10,8 @@ import app.fdroidserver.github.GitHubReleaseChecker
 import app.fdroidserver.github.GithubScheduler
 import app.fdroidserver.patching.PatchApplier
 import app.fdroidserver.patching.PatchLibrary
-import app.fdroidserver.patching.PatchLibraryGithubScheduler
+import app.fdroidserver.patching.PatchSourceHttpClient
+import app.fdroidserver.patching.PatchSourceScheduler
 import app.fdroidserver.patching.PatchScheduler
 import app.fdroidserver.patching.PatchWorkerEntryPoint
 import app.fdroidserver.patching.PatchWorkerLauncher
@@ -48,6 +49,11 @@ fun main(args: Array<String>) {
     if (args.size == 3 && args[0] == PatchWorkerLauncher.PATCH_WORKER_FLAG) {
         kotlin.system.exitProcess(PatchWorkerEntryPoint.run(args[1], args[2]))
     }
+
+    // The vendored engine and morphe-patcher log through java.util.logging;
+    // route those records into logback so they obey LOG_LEVEL and look like
+    // everything else.
+    LoggingBridge.install()
 
     val logger = LoggerFactory.getLogger("Main")
 
@@ -91,8 +97,8 @@ fun main(args: Array<String>) {
 
     // Created up front (rather than gated behind the "setup complete" wait
     // below, like githubScheduler is) since AdminServer's routes - including
-    // the Patch Library's "Check GitHub now" button - need a
-    // PatchLibraryGithubScheduler instance to register at startup. The
+    // the Patch Library's "Check source now" button - need a
+    // PatchSourceScheduler instance to register at startup. The
     // scheduled background checks (in the loops below) still don't run
     // until setup completes, same as every other scheduler. githubToken is
     // snapshotted once here, same as the existing githubScheduler already
@@ -101,12 +107,18 @@ fun main(args: Array<String>) {
     val githubHttpClient = HttpClient(CIO)
     val initialGithubToken = runBlocking { appConfig.getSettings() }.githubToken.ifBlank { null }
     val releaseChecker = GitHubReleaseChecker(githubHttpClient, initialGithubToken)
-    val patchLibraryGithubScheduler = PatchLibraryGithubScheduler(appConfig, releaseChecker, patchesDir, AppConfig.PatchSchemas.Mobile)
-    val patchLibraryGithubSchedulerTv = PatchLibraryGithubScheduler(appConfig, releaseChecker, patchesTvDir, AppConfig.PatchSchemas.Tv)
+
+    // Separate client for the patch sources: the vendored engine's sources take
+    // a plain HttpClient and set their own headers, and this one additionally
+    // attaches the GitHub token to GitHub hosts only (see PatchSourceHttpClient)
+    // so a GitLab-hosted patch source never receives it.
+    val patchSourceHttpClient = PatchSourceHttpClient.create(initialGithubToken)
+    val patchSourceScheduler = PatchSourceScheduler(appConfig, patchSourceHttpClient, patchesDir, AppConfig.PatchSchemas.Mobile)
+    val patchSourceSchedulerTv = PatchSourceScheduler(appConfig, patchSourceHttpClient, patchesTvDir, AppConfig.PatchSchemas.Tv)
 
     val adminServer = AdminServer(
-        appConfig, patchLibrary, patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler, patchLibraryGithubScheduler,
-        patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchLibraryGithubSchedulerTv,
+        appConfig, patchLibrary, patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler, patchSourceScheduler,
+        patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchSourceSchedulerTv,
     )
     adminServer.start()
     logger.info("Admin server started on :5001")
@@ -207,8 +219,8 @@ fun main(args: Array<String>) {
                         // Checked right before patchScheduler so a freshly
                         // auto-imported .mpp is used the same cycle it's
                         // downloaded in, not the next one.
-                        runCatching { patchLibraryGithubScheduler.checkForUpdates() }
-                            .onFailure { logger.error("Patch library GitHub scheduler error: $it") }
+                        runCatching { patchSourceScheduler.checkForUpdates() }
+                            .onFailure { logger.error("Patch source scheduler error: $it") }
                         runCatching { patchScheduler.checkForUpdates() }
                             .onFailure { logger.error("Patch scheduler error: $it") }
                         delay(patchInterval)
@@ -216,8 +228,8 @@ fun main(args: Array<String>) {
                 }
                 val patchTvJob = launch {
                     while (true) {
-                        runCatching { patchLibraryGithubSchedulerTv.checkForUpdates() }
-                            .onFailure { logger.error("Patch library GitHub scheduler (TV) error: $it") }
+                        runCatching { patchSourceSchedulerTv.checkForUpdates() }
+                            .onFailure { logger.error("Patch source scheduler (TV) error: $it") }
                         runCatching { patchSchedulerTv.checkForUpdates() }
                             .onFailure { logger.error("Patch TV scheduler error: $it") }
                         delay(patchInterval)
@@ -229,6 +241,7 @@ fun main(args: Array<String>) {
                 patchTvJob.join()
             } finally {
                 githubHttpClient.close()
+                patchSourceHttpClient.close()
             }
         } catch (e: CancellationException) {
             logger.info("Shutdown complete")

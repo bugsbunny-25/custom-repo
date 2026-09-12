@@ -144,7 +144,17 @@ class PatchScheduler(
                     logger.warn("${target.id}: attached patch '${attachment.patchId}' not found in library, skipping")
                     continue
                 }
-                if (applyPatchToVersion(target, attachment, libEntry, version, versionPageUrl, source, preparedApkPath)) updated = true
+                // The operator pasted this exact version page, so honour it even
+                // if the .mpp doesn't list the version - see applyPatchToVersion's
+                // forceCompatibility parameter.
+                if (
+                    applyPatchToVersion(
+                        target, attachment, libEntry, version, versionPageUrl, source, preparedApkPath,
+                        forceCompatibility = true,
+                    )
+                ) {
+                    updated = true
+                }
             }
         } finally {
             preparedApkPath.delete()
@@ -344,6 +354,10 @@ class PatchScheduler(
                     applyPatchToVersion(
                         target, attachment, libEntry, version,
                         candidate.entry.pageUrl, candidate.source, preparedApkPath,
+                        // Versions the operator pinned by hand win over the .mpp's
+                        // own compatibility list; a derived list came from that same
+                        // .mpp, so the engine's check agrees with it either way.
+                        forceCompatibility = !usingDerivedVersions,
                     )
                 ) {
                     updated = true
@@ -363,7 +377,14 @@ class PatchScheduler(
      * per-version sweep and [runSpecificVersion]'s direct, user-triggered
      * single-version run; both pass a [preparedApkPath] that's shared across
      * every attachment for the same [version] so the download/merge only
-     * happens once (see the worker's own existence check). */
+     * happens once (see the worker's own existence check).
+     *
+     * [forceCompatibility] is handed through to the vendored engine, which
+     * otherwise skips any patch whose declared app versions don't include the
+     * APK's own `versionName`. Pass it when the version being patched was
+     * chosen by an operator (a pinned `supported_versions` entry, or a pasted
+     * version page) rather than derived from the `.mpp`'s compatibility list -
+     * they asked for that version specifically. */
     private suspend fun applyPatchToVersion(
         target: AppConfig.EnabledPatchTarget,
         attachment: AppConfig.PatchAttachmentView,
@@ -372,6 +393,7 @@ class PatchScheduler(
         versionPageUrl: String,
         source: Source,
         preparedApkPath: File,
+        forceCompatibility: Boolean,
     ): Boolean {
         val patchFile = File(patchesDir, libEntry.file)
         if (!patchFile.exists()) {
@@ -399,6 +421,7 @@ class PatchScheduler(
                 outputPath,
                 workDir,
                 signing,
+                forceCompatibility,
             )
         } finally {
             workDir.deleteRecursively()
@@ -411,6 +434,10 @@ class PatchScheduler(
                     outputPath.delete()
                     return false
                 }
+                logger.info(
+                    "${target.id}: patched $version with '${attachment.patchId}' " +
+                        "(${result.appliedPatches.size} patches applied)",
+                )
                 appConfig.recordPatchCheckedEntry(
                     schema = schema,
                     targetId = target.id,

@@ -23,8 +23,8 @@ application {
 }
 
 dependencies {
-    // morphe-patcher, the library morphe-cli itself is built on - depended on
-    // directly as a normal Maven artifact (see settings.gradle.kts for the
+    // morphe-patcher, the library the Morphe desktop app itself is built on -
+    // depended on directly as a normal Maven artifact (see settings.gradle.kts for the
     // GitHub Packages repo + credentials this resolves through). It's a plain
     // JVM library with no bundled GUI/Ktor/coroutines of its own to conflict
     // with our own versions (unlike the morphe-cli release jar, which bundles
@@ -35,6 +35,10 @@ dependencies {
     // kotlin-reflect) come along automatically as a real `implementation`
     // dependency, so it's also bundled into the shadow jar below like every
     // other dependency - no separate jar on the runtime classpath anymore.
+    //
+    // This is what the vendored `app.morphe.engine` package (a hard fork of
+    // morphe-desktop's engine - see app/src/main/kotlin/app/morphe/engine/README.md)
+    // compiles against, so the pinned version tracks morphe-desktop's own catalog.
     implementation(libs.morphe.patcher)
 
     implementation(libs.ktor.server.netty)
@@ -52,11 +56,15 @@ dependencies {
     implementation(libs.jsoup)
     implementation(libs.slf4j.api)
     implementation(libs.logback.classic)
+    // Routes the vendored app.morphe.engine package's (and morphe-patcher's own)
+    // java.util.logging records into logback - see LoggingBridge.
+    implementation(libs.jul.to.slf4j)
 
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.ktor.server.test.host)
+    testImplementation(libs.ktor.client.mock)
 }
 
 tasks.test {
