@@ -51,6 +51,10 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
         ) : ApplyResult()
 
         data class Failure(val packageName: String?, val error: Throwable) : ApplyResult()
+
+        /** The APK was not patched because devices served by this repo can't
+         * run it (see [NativeAbiCheck]); [reason] is shown in the admin UI. */
+        data class Unsupported(val packageName: String?, val reason: String) : ApplyResult()
     }
 
     /** Loads every patch out of [patchFile] through the engine's
