@@ -73,6 +73,11 @@ actually changed, opens a PR with the files re-copied, the deltas re-applied,
 `FORK_INFO` bumped, and `morphe-patcher` moved to whatever upstream now pins.
 A release that doesn't touch the engine produces no PR.
 
+The sync only refreshes files already vendored, with one exception: when a
+vendored file references a type declared in a file new upstream, that file is
+pulled in too (repeatedly, so its own new dependencies follow), and the PR
+calls it out. New upstream files nothing here uses are left behind.
+
 To run it yourself - the workflow calls exactly this:
 
 ```bash

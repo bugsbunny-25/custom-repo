@@ -82,6 +82,8 @@ jobs:
             **Changed**
             ${{ steps.sync.outputs.changed_files }}
 
+            ${{ steps.sync.outputs.added_files && format('🆕 **New upstream files pulled in:** `{0}` - vendored code now depends on these. Check each is headless (no desktop-only `app.morphe.gui` or data-dir code); if it needs changes to compile here, add a local delta.', steps.sync.outputs.added_files) || '' }}
+
             ${{ steps.sync.outputs.missing_files && format('⚠️ **No longer present upstream:** `{0}` - these were renamed, split, or deleted. Do not just merge; work out where they went.', steps.sync.outputs.missing_files) || '' }}
 
             **Before merging**

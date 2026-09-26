@@ -82,6 +82,45 @@ done < <(cd "$LOCAL_ENGINE_DIR" && find . -name '*.kt' -type f | sed 's|^\./||' 
 
 echo "copied $copied file(s)"
 
+# The loop above only refreshes files we already have, so a file upstream adds
+# is never picked up - even when a vendored file now depends on it (v1.17.0's
+# RemotePatchSourceFactory started using the new PullRequestPatchSource, and
+# the sync PR failed to compile). Pull in any new upstream file declaring a
+# type that vendored code references, repeating until nothing more is needed,
+# since a pulled-in file can depend on yet another new one. Only type
+# declarations are matched, and comments are ignored, so a desktop-only file
+# isn't dragged in because a vendored comment happens to mention it.
+declared_types() { # the class/object/interface/typealias names a .kt file declares
+  grep -oE '^[[:space:]]*((public|internal|private|sealed|data|enum|abstract|open|annotation|value|inline|fun)[[:space:]]+)*(class|object|interface|typealias)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$1" \
+    | awk '{print $NF}' | sort -u
+}
+vendored_code() { # every vendored .kt file, minus comment lines
+  find "$LOCAL_ENGINE_DIR" -name '*.kt' -type f -exec cat {} + \
+    | grep -vE '^[[:space:]]*(//|/?\*)'
+}
+added=()
+while :; do
+  pulled=0
+  while IFS= read -r rel; do
+    [ -f "$LOCAL_ENGINE_DIR/$rel" ] && continue
+    for type in $(declared_types "$upstream_engine/$rel"); do
+      if vendored_code | grep -qw -- "$type"; then
+        mkdir -p "$LOCAL_ENGINE_DIR/$(dirname "$rel")"
+        cp "$upstream_engine/$rel" "$LOCAL_ENGINE_DIR/$rel"
+        echo "new upstream file pulled in: $rel (uses $type)"
+        added+=("$rel")
+        pulled=1
+        break
+      fi
+    done
+  done < <(cd "$upstream_engine" && find . -name '*.kt' -type f | sed 's|^\./||' | sort)
+  [ "$pulled" -eq 1 ] || break
+done
+
+if [ ${#added[@]} -gt 0 ]; then
+  emit "added_files=${added[*]}"
+fi
+
 # A vendored file disappearing upstream is a real signal (renamed, split, or
 # deleted), not something to paper over - surface it rather than silently
 # keeping our now-orphaned copy.
@@ -149,7 +188,13 @@ See README.md in this directory for what was taken, what was left behind, and
 the list of local deltas to re-apply when re-syncing.
 EOF
 
-if git diff --quiet -- "$LOCAL_ENGINE_DIR" "$LOCAL_CATALOG"; then
+# git status rather than git diff, so a newly pulled-in file (untracked until
+# the PR commits it) counts as a change and is listed.
+engine_status() {
+  git status --porcelain --untracked-files=all -- "$LOCAL_ENGINE_DIR" "$LOCAL_CATALOG"
+}
+
+if [ -z "$(engine_status)" ]; then
   echo "no content changes between $current_tag and $target_tag"
   git checkout -- "$fork_info" 2>/dev/null || true
   emit "changed=false"
@@ -157,7 +202,7 @@ if git diff --quiet -- "$LOCAL_ENGINE_DIR" "$LOCAL_CATALOG"; then
   exit 0
 fi
 
-changed_files=$(git diff --name-only -- "$LOCAL_ENGINE_DIR" "$LOCAL_CATALOG" | sed 's|^|- |')
+changed_files=$(engine_status | cut -c4- | sort -u | sed 's|^|- |')
 
 emit "changed=true"
 emit "from_tag=$current_tag"
