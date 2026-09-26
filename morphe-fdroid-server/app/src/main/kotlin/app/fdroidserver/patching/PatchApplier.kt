@@ -73,7 +73,13 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
      * [packageName] - set it when an operator pinned this exact app version
      * by hand (they asked for that version specifically, even if the `.mpp`
      * doesn't list it); leave it off when the version list was derived from
-     * the `.mpp` itself, where the check is a no-op anyway.
+     * the `.mpp` itself.
+     *
+     * Otherwise a patch runs only on versions its `.mpp` declares for
+     * [packageName] (see [supportsAppVersion]); [includeExperimental] also
+     * accepts the ones declared experimental, including an experimental
+     * "any version" target - the attachment's "include experimental
+     * versions" opt-in, which picked the version in the first place.
      *
      * Failure handling is strict: if any selected patch throws, no APK is
      * written and this returns [ApplyResult.Failure]. A partially patched
@@ -91,6 +97,7 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
         workDir: File,
         signing: SigningConfig,
         forceCompatibility: Boolean = false,
+        includeExperimental: Boolean = false,
     ): ApplyResult {
         workDir.mkdirs()
 
@@ -102,6 +109,7 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
             enabledPatches = enabled,
             disabledPatches = disabled,
             forceCompatibility = forceCompatibility,
+            versionFilter = { patch, pkg, versionName -> patch.supportsAppVersion(pkg, versionName, includeExperimental) },
             patchOptions = PatchSelector.convertOptions(patches, optionOverrides),
             keystoreDetails = ApkUtils.KeyStoreDetails(
                 signing.keystoreFile,

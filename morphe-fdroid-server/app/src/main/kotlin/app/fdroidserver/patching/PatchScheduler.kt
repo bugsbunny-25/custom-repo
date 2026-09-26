@@ -264,16 +264,19 @@ class PatchScheduler(
                 // was already published, undoing pruneOldVersions's intent of
                 // keeping only the newest versions around.
                 val usingDerivedVersions = attachment.supportedVersions.isEmpty()
+                val derived = if (usingDerivedVersions) deriveSupportedVersions(libEntry, target.packageName) else null
                 val supportedVersions = attachment.supportedVersions.ifEmpty {
-                    val derived = deriveSupportedVersions(libEntry, target.packageName)
-                    if (attachment.includeExperimentalVersions) {
-                        derived.versions
-                    } else {
-                        derived.versions.filterNot { it in derived.experimentalVersions }
-                    }
+                    derived?.patchableVersions(attachment.includeExperimentalVersions).orEmpty()
                 }
                 if (supportedVersions.isEmpty()) {
-                    logger.warn("${target.id}: no supported_versions configured for patch '${attachment.patchId}' and none found in the .mpp file, skipping")
+                    if (derived != null && derived.patchableVersions(includeExperimental = true).isNotEmpty()) {
+                        logger.warn(
+                            "${target.id}: the .mpp for patch '${attachment.patchId}' only declares experimental " +
+                                "versions of ${target.packageName}, and the attachment doesn't include experimental versions, skipping",
+                        )
+                    } else {
+                        logger.warn("${target.id}: no supported_versions configured for patch '${attachment.patchId}' and none found in the .mpp file, skipping")
+                    }
                     continue
                 }
 
@@ -356,7 +359,8 @@ class PatchScheduler(
                         candidate.entry.pageUrl, candidate.source, preparedApkPath,
                         // Versions the operator pinned by hand win over the .mpp's
                         // own compatibility list; a derived list came from that same
-                        // .mpp, so the engine's check agrees with it either way.
+                        // .mpp, so the engine's check (which honours the attachment's
+                        // experimental opt-in too) agrees with it.
                         forceCompatibility = !usingDerivedVersions,
                     )
                 ) {
@@ -422,6 +426,7 @@ class PatchScheduler(
                 workDir,
                 signing,
                 forceCompatibility,
+                attachment.includeExperimentalVersions,
             )
         } finally {
             workDir.deleteRecursively()
@@ -456,35 +461,31 @@ class PatchScheduler(
         }
     }
 
-    /** [versions]: every version the .mpp declares support for. [experimentalVersions]:
-     * the subset of those flagged experimental by morphe-patcher's `AppTarget.isExperimental` -
-     * excluded from [versions] by callers unless the attachment opts in
-     * (see `PatchScheduler.checkTarget`). */
-    private data class DerivedVersions(val versions: List<String>, val experimentalVersions: Set<String>)
-
     /** When an attachment doesn't specify supported_versions, fall back to
-     * whatever the .mpp file itself declares (via [PatchLibrary]), filtered
-     * to the target's package_name. A package with no version list in the
-     * .mpp means "any version" (represented as a single "*" pattern). */
-    private fun deriveSupportedVersions(libEntry: AppConfig.PatchLibraryEntry, packageName: String): DerivedVersions {
+     * whatever the .mpp file itself declares (via [PatchLibrary]) for the
+     * target's package_name - null when the file can't be read or doesn't
+     * name the package. Which of those versions are patched (stable only, or
+     * experimental too) is up to the attachment - see
+     * [AppVersionSupport.patchableVersions]. A patch that doesn't restrict
+     * the version at all yields the `"*"` pattern. */
+    private fun deriveSupportedVersions(libEntry: AppConfig.PatchLibraryEntry, packageName: String): AppVersionSupport? {
         val patchFile = File(patchesDir, libEntry.file)
-        if (!patchFile.exists()) return DerivedVersions(emptyList(), emptySet())
+        if (!patchFile.exists()) return null
 
         val patches = try {
             patchLibrary.inspect(patchFile)
         } catch (e: Exception) {
             logger.warn("Could not read supported versions from '${libEntry.id}': $e")
-            return DerivedVersions(emptyList(), emptySet())
+            return null
         }
 
         for (patch in patches) {
             for (pkg in patch.packages) {
                 if (packageName.isNotBlank() && pkg.packageName != packageName) continue
-                if (pkg.versions.isEmpty()) return DerivedVersions(listOf("*"), emptySet())
-                return DerivedVersions(pkg.versions, pkg.experimentalVersions.toSet())
+                return pkg.toVersionSupport()
             }
         }
-        return DerivedVersions(emptyList(), emptySet())
+        return null
     }
 
     private fun matchesSupportedVersion(version: String, supportedVersions: List<String>): Boolean {

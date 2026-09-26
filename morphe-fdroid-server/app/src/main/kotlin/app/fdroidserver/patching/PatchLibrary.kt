@@ -2,7 +2,6 @@ package app.fdroidserver.patching
 
 import app.morphe.engine.PatchBundleIncompatibleException
 import app.morphe.engine.PatcherCompatibility
-import app.morphe.engine.compatibleVersionsForDisplay
 import app.morphe.engine.patches.PatchBundleLoader
 import app.morphe.engine.readableMessage
 import app.morphe.patcher.patch.Patch
@@ -15,13 +14,13 @@ import java.io.File
  * vendored engine's [PatchBundleLoader] and reading the resulting typed
  * `Patch` objects - no CLI, no text parsing.
  *
- * Compatibility data is read via the engine's
- * [compatibleVersionsForDisplay] extension rather than by walking
- * `Patch.compatibility` by hand, so this agrees with what morphe-desktop shows
- * for the same file - including its fallback to the deprecated
- * `compatiblePackages` shape, which older `.mpp` bundles still use and which
- * the hand-rolled version this replaces ignored entirely (such bundles showed
- * up as "universal", i.e. compatible with every app).
+ * Compatibility data comes from [appVersionSupport], which reads
+ * `Patch.compatibility` itself rather than through the engine's
+ * `compatibleVersionsForDisplay`: that helper drops `AppTarget(version = null)`
+ * ("any version"), which is how a bundle declares experimental support for
+ * versions beyond its tested list. Older `.mpp` bundles that still use the
+ * deprecated `compatiblePackages` shape are covered too - morphe-patcher
+ * converts it into `compatibility` when the patch is constructed.
  */
 class PatchLibrary {
 
@@ -33,13 +32,23 @@ class PatchLibrary {
         // identifier (reserved keyword), hence the SerialName override
         // rather than just renaming the Kotlin property.
         @SerialName("package") val packageName: String,
-        val versions: List<String>, // empty == compatible with any version of this package
+        // Specific versions declared for this package, stable and
+        // experimental. Empty when the patch only declares "any version".
+        val versions: List<String>,
         // Subset of [versions] that morphe-patcher's AppTarget.isExperimental
         // flags as only experimentally supported. Excluded by default when
         // deciding what to patch (see PatchScheduler) unless a target opts
         // in via PatchAttachment.includeExperimentalVersions.
         val experimentalVersions: List<String> = emptyList(),
-    )
+        // An `AppTarget(version = null)`: any version of the package is
+        // supported, as a stable target...
+        val anyVersion: Boolean,
+        // ...or only experimentally (usually alongside a list of tested
+        // [versions]); honoured only when the attachment opts in.
+        val anyVersionExperimental: Boolean,
+    ) {
+        fun toVersionSupport() = AppVersionSupport(versions, experimentalVersions, anyVersion, anyVersionExperimental)
+    }
 
     @Serializable
     data class OptionInfo(
@@ -88,23 +97,17 @@ class PatchLibrary {
     fun inspect(mppFile: File): List<PatchInfo> = inspect(setOf(mppFile))
 
     private fun Patch<*>.toPatchInfo(): PatchInfo {
-        // Two passes over the same data: everything, then only the
-        // non-experimental targets. The difference is the experimental set -
-        // the engine's helper doesn't expose the flag itself, only the
-        // filtered lists.
-        val allVersions = versionsByPackage(includeExperimental = true)
-        val stableVersions = versionsByPackage(includeExperimental = false)
-
         return PatchInfo(
             name = name,
             description = description,
             enabled = default,
-            packages = allVersions.map { (packageName, versions) ->
-                val stable = stableVersions[packageName].orEmpty().toSet()
+            packages = appVersionSupport().map { (packageName, support) ->
                 PackageInfo(
                     packageName = packageName,
-                    versions = versions,
-                    experimentalVersions = versions.filterNot { it in stable },
+                    versions = support.versions,
+                    experimentalVersions = support.experimentalVersions,
+                    anyVersion = support.anyVersion,
+                    anyVersionExperimental = support.anyVersionExperimental,
                 )
             },
             options = options.values.map { option ->
@@ -120,17 +123,4 @@ class PatchLibrary {
             },
         )
     }
-
-    /**
-     * Package name -> declared versions, merging the engine's per-compatibility-entry
-     * pairs (a patch can declare the same package more than once) and dropping
-     * universal entries, whose package name is null. An empty version list is
-     * kept as-is: it means "any version of this package", the convention
-     * [PackageInfo.versions] documents.
-     */
-    private fun Patch<*>.versionsByPackage(includeExperimental: Boolean): Map<String, List<String>> =
-        compatibleVersionsForDisplay(includeExperimental)
-            .mapNotNull { (packageName, versions) -> packageName?.let { it to versions } }
-            .groupBy({ it.first }, { it.second })
-            .mapValues { (_, versionLists) -> versionLists.flatten().distinct() }
 }

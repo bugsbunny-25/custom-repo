@@ -1,0 +1,51 @@
+--- a/PatchEngine.kt
++++ b/PatchEngine.kt
+@@ -58,7 +58,17 @@
+         val architecturesToKeep: Set<CpuArchitecture> = emptySet(),
+         val tempDir: File? = null,
+         val failOnError: Boolean = true,
+-        val bytecodeMode: BytecodeMode = BytecodeMode.STRIP_FAST
++        val bytecodeMode: BytecodeMode = BytecodeMode.STRIP_FAST,
++        /**
++         * LOCAL DELTA (see README.md): decides whether a patch declared for the
++         * APK's package supports its version name, in place of the check against
++         * [supportedVersionsFor]. That helper drops `AppTarget(version = null)`
++         * ("any version") and ignores `isExperimental`, so a patch declared as
++         * "these versions, plus any other experimentally" was skipped on every
++         * unlisted version. Null keeps upstream's check. [forceCompatibility]
++         * still overrides it.
++         */
++        val versionFilter: ((patch: Patch<*>, packageName: String, versionName: String) -> Boolean)? = null,
+     ) {
+         companion object {
+             internal const val DEFAULT_KEYSTORE_ALIAS = "Morphe"
+@@ -163,6 +173,7 @@
+                     disabledPatches = config.disabledPatches,
+                     exclusiveMode = config.exclusiveMode,
+                     forceCompatibility = config.forceCompatibility,
++                    versionFilter = config.versionFilter,
+                     onProgress = onProgress,
+                 )
+ 
+@@ -319,6 +330,7 @@
+         disabledPatches: Set<String>,
+         exclusiveMode: Boolean,
+         forceCompatibility: Boolean,
++        versionFilter: ((Patch<*>, String, String) -> Boolean)?,
+         onProgress: (String) -> Unit,
+     ): Set<Patch<*>> = buildSet {
+         patches.forEach patchLoop@{ patch ->
+@@ -328,6 +340,13 @@
+             val supportedVersions = patch.supportedVersionsFor(packageName)
+             when {
+                 supportedVersions != null && supportedVersions.isEmpty() -> return@patchLoop
++                // LOCAL DELTA (see README.md): caller-supplied version check.
++                versionFilter != null -> {
++                    if (!forceCompatibility && !versionFilter(patch, packageName, packageVersion)) {
++                        onProgress("Skipping \"$patchName\": incompatible with $packageName $packageVersion")
++                        return@patchLoop
++                    }
++                }
+                 supportedVersions != null -> {
+                     val matchesVersion = forceCompatibility || packageVersion in supportedVersions
+                     if (!matchesVersion) {
