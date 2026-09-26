@@ -64,6 +64,11 @@ private data class PatchWorkerResponse(
      * stdout. */
     val appliedPatches: List<String> = emptyList(),
     val error: String? = null,
+    /** Set (with success = false) when the APK was deliberately not patched
+     * because it has no arm64-v8a native code - see [NativeAbiCheck]. Kept
+     * apart from [error] so the scheduler can record it as a skip instead of
+     * retrying the download every pass. */
+    val unsupportedReason: String? = null,
 )
 
 /**
@@ -156,7 +161,9 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
                 return PatchApplier.ApplyResult.Failure(null, RuntimeException(workerDiedMessage(process.exitValue())))
             }
             val response = json.decodeFromString<PatchWorkerResponse>(responseJson)
-            if (response.success) {
+            if (response.unsupportedReason != null) {
+                PatchApplier.ApplyResult.Unsupported(response.packageName, response.unsupportedReason)
+            } else if (response.success) {
                 PatchApplier.ApplyResult.Success(
                     response.packageName ?: "",
                     response.versionName ?: "",
@@ -272,6 +279,14 @@ object PatchWorkerEntryPoint {
             }
         }
 
+        // Checked on every run, not only after a fresh download, so an APK
+        // prepared before this check existed can't slip through.
+        val abiCheck = NativeAbiCheck.check(preparedApk)
+        if (abiCheck is NativeAbiCheck.Result.Unsupported) {
+            logger.warn("Not patching ${request.versionPageUrl}: ${abiCheck.reason}")
+            return PatchWorkerResponse(false, request.packageName, unsupportedReason = abiCheck.reason)
+        }
+
         val applier = PatchApplier()
         // Patch filtering (defaults, package + app-version compatibility) and
         // option typing now happen inside PatchApplier/the engine, so the whole
@@ -300,6 +315,8 @@ object PatchWorkerEntryPoint {
             is PatchApplier.ApplyResult.Success ->
                 PatchWorkerResponse(true, result.packageName, result.versionName, result.appliedPatches)
             is PatchApplier.ApplyResult.Failure -> PatchWorkerResponse(false, result.packageName, error = result.error.toString())
+            is PatchApplier.ApplyResult.Unsupported ->
+                PatchWorkerResponse(false, result.packageName, unsupportedReason = result.reason)
         }
     }
 }

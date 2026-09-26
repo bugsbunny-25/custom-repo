@@ -99,8 +99,8 @@ class ApkMirrorClient(
         }
     }
 
-    /** From a version page, picks a variant (preferring a plain APK over an
-     * .apkm bundle, and arm64-v8a/universal over other architectures within
+    /** From a version page, picks a variant (preferring arm64-v8a/universal
+     * over other architectures, and a plain APK over an .apkm bundle within
      * that) and returns its download page URL. */
     private fun findVariantDownloadPage(versionPageUrl: String): String? =
         pickBestVariantHref(parse(get(versionPageUrl), versionPageUrl))
@@ -115,11 +115,14 @@ class ApkMirrorClient(
     /**
      * Pure selection logic, pulled out of [findVariantDownloadPage] so it's
      * unit-testable against synthetic HTML fixtures without a network call
-     * (see `ApkMirrorClientTest`). Prefers a plain APK variant (ideally
-     * universal/arm64-v8a); if the app only ships an .apkm BUNDLE on
-     * APKMirror (common for large apps), falls back to that - BundleMerger
-     * merges bundles into a single APK before patching, so a bundle variant
-     * is still usable, just less preferred.
+     * (see `ApkMirrorClientTest`). Architecture comes first: every device
+     * this repo serves is arm64, so an arm64-v8a/universal variant wins even
+     * when it's only offered as an .apkm BUNDLE (BundleMerger merges bundles
+     * into a single APK before patching, so that's still usable). Among
+     * variants of the same architecture class, a plain APK is preferred.
+     * A non-arm64 variant is only picked when nothing else exists, and
+     * [app.fdroidserver.patching.NativeAbiCheck] then refuses it before
+     * patching unless it turns out to have no native code at all.
      */
     internal fun pickBestVariantHref(doc: Document): String? {
         val rows = doc.select("div.variants-table div.table-row").ifEmpty { doc.select("div.table-row") }
@@ -137,7 +140,7 @@ class ApkMirrorClient(
         if (candidates.isEmpty()) return null
 
         return candidates.sortedWith(
-            compareBy({ !it.isApk }, { !it.isArm64OrUniversal }, { !it.isBundle })
+            compareBy({ !it.isArm64OrUniversal }, { !it.isApk }, { !it.isBundle })
         ).first().href
     }
 

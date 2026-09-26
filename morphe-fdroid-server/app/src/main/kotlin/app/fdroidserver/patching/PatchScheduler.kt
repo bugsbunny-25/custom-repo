@@ -453,6 +453,22 @@ class PatchScheduler(
                 logger.error("${target.id}: morphe patch '${attachment.patchId}' failed for $version: ${result.error}")
                 false
             }
+            is PatchApplier.ApplyResult.Unsupported -> {
+                // Recorded as checked (with no APK) so the same version isn't
+                // re-downloaded every pass, and so the reason shows up in the
+                // admin UI's version list, where deleting the entry retries it.
+                logger.warn("${target.id}: skipped $version for patch '${attachment.patchId}': ${result.reason}")
+                appConfig.recordPatchCheckedEntry(
+                    schema = schema,
+                    targetId = target.id,
+                    cacheKey = cacheKey,
+                    version = version,
+                    patchId = attachment.patchId,
+                    patchVersion = libEntry.version,
+                    output = "skipped: ${result.reason}",
+                )
+                false
+            }
         }
     }
 
