@@ -45,6 +45,10 @@ private data class PatchWorkerRequest(
      * [PatchApplier.apply]. Defaults to false so a request written by an
      * older build still decodes. */
     val forceCompatibility: Boolean = false,
+    /** Whether versions the `.mpp` only supports experimentally count as
+     * compatible - see [PatchApplier.apply]. Defaults to false so a request
+     * written by an older build still decodes. */
+    val includeExperimental: Boolean = false,
     val outputApk: String,
     val workDir: String,
     val keystoreFile: String,
@@ -110,6 +114,7 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
         workDir: File,
         signing: PatchApplier.SigningConfig,
         forceCompatibility: Boolean = false,
+        includeExperimental: Boolean = false,
     ): PatchApplier.ApplyResult {
         workDir.mkdirs()
         val requestFile = createRestrictedTempFile("patch-worker-request", ".json")
@@ -128,6 +133,7 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
                         optionOverrides = optionOverrides,
                         packageName = packageName,
                         forceCompatibility = forceCompatibility,
+                        includeExperimental = includeExperimental,
                         outputApk = outputApk.absolutePath,
                         workDir = workDir.absolutePath,
                         keystoreFile = signing.keystoreFile.absolutePath,
@@ -310,6 +316,7 @@ object PatchWorkerEntryPoint {
                 workDir = workDir,
                 signing = signing,
                 forceCompatibility = request.forceCompatibility,
+                includeExperimental = request.includeExperimental,
             )
         ) {
             is PatchApplier.ApplyResult.Success ->
