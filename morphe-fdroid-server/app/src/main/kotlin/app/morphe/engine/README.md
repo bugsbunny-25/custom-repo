@@ -63,7 +63,15 @@ Kept as small as possible so re-syncing stays cheap:
    environment only.** Upstream reads it from the desktop app's
    `ConfigRepository` (`app.morphe.gui`), which isn't vendored, then falls back
    to `GITHUB_TOKEN` / `GH_TOKEN`. We keep just the env fallback.
-3. Nothing else. All other files are byte-identical to upstream.
+3. **`PatchEngine.kt` - caller-supplied version filter.** `Config.versionFilter`
+   (null by default, which keeps upstream's check) replaces the
+   `supportedVersionsFor()` membership test in `filterPatches`. Upstream's helper
+   drops `AppTarget(version = null)` ("any version") and ignores
+   `isExperimental`, so an experimental "any version" target could never be
+   patched. This server passes `supportsAppVersion`
+   (`app.fdroidserver.patching.AppVersionSupport`), which honours both and the
+   attachment's experimental opt-in.
+4. Nothing else. All other files are byte-identical to upstream.
 
 ## Re-syncing
 

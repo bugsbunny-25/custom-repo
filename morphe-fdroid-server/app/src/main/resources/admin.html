@@ -597,6 +597,16 @@
         .replaceAll("'", '&#39;');
     }
 
+    // One package's declared versions from the .mpp, marking the ones only
+    // supported experimentally (patched only when an attachment opts in).
+    function describePackageVersions(pkg) {
+      const experimental = new Set(pkg.experimental_versions || []);
+      const listed = (pkg.versions || []).map((v) => (experimental.has(v) ? `${v} (experimental)` : v));
+      if (pkg.any_version) return listed.length ? `all versions (listed: ${listed.join(', ')})` : 'all versions';
+      if (pkg.any_version_experimental) listed.push(listed.length ? 'any other version (experimental)' : 'any version (experimental)');
+      return listed.join(', ');
+    }
+
     async function loadRepos() {
       const res = await fetch('/api/repos');
       const data = await res.json();
@@ -980,12 +990,12 @@
       const UNRESTRICTED = '(any package)';
       const byPackage = {};
       for (const p of data.patches) {
-        const entries = p.packages.length ? p.packages : [{ package: UNRESTRICTED, versions: [] }];
+        const entries = p.packages.length ? p.packages : [{ package: UNRESTRICTED, versions: [], any_version: true }];
         for (const pkg of entries) {
           (byPackage[pkg.package] = byPackage[pkg.package] || []).push({
             name: p.name || '(unnamed patch)',
             description: p.description,
-            versions: pkg.versions,
+            versionsText: describePackageVersions(pkg),
           });
         }
       }
@@ -1005,7 +1015,7 @@
                 <div class="file-row">
                   <div>
                     <strong>${escapeHtml(entry.name)}</strong>
-                    <span class="entry-meta"> — ${entry.versions.length ? escapeHtml(entry.versions.join(', ')) : 'all versions'}${entry.description ? ' — ' + escapeHtml(entry.description) : ''}</span>
+                    <span class="entry-meta"> — ${escapeHtml(entry.versionsText)}${entry.description ? ' — ' + escapeHtml(entry.description) : ''}</span>
                   </div>
                 </div>
               `).join('')}
