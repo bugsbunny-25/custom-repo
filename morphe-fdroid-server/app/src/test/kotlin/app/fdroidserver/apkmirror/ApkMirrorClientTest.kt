@@ -26,12 +26,21 @@ class ApkMirrorClientTest {
         """<div class="table-row">$text <a class="accent_color" href="$href">download</a></div>"""
 
     @Test
-    fun `prefers a plain apk over a bundle`() {
+    fun `prefers a plain apk over a bundle of the same architecture`() {
+        val document = doc(
+            row("BUNDLE (arm64-v8a)", "/bundle-arm64") +
+                row("APK (arm64-v8a)", "/apk-arm64"),
+        )
+        assertEquals("https://www.apkmirror.com/apk-arm64", client.pickBestVariantHref(document))
+    }
+
+    @Test
+    fun `prefers an arm64-v8a bundle over a plain apk for another architecture`() {
         val document = doc(
             row("APK (armeabi-v7a)", "/apk-armeabi") +
                 row("BUNDLE (arm64-v8a)", "/bundle-arm64"),
         )
-        assertEquals("https://www.apkmirror.com/apk-armeabi", client.pickBestVariantHref(document))
+        assertEquals("https://www.apkmirror.com/bundle-arm64", client.pickBestVariantHref(document))
     }
 
     @Test
