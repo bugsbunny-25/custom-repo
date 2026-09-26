@@ -9,7 +9,7 @@ import java.util.zip.ZipFile
  * native code for other ABIs (armeabi-v7a, x86, ...) would publish fine and
  * then fail to install or crash on launch.
  *
- * Native code lives at `lib/<abi>/*.so` in an APK; split bundles are merged
+ * Native code lives at `lib/<abi>/<name>.so` in an APK; split bundles are merged
  * by [BundleMerger] first, which folds every split's `lib/` into the one APK,
  * so this only ever needs to look at a single file. An APK with no `.so`
  * files at all is pure Java/Kotlin and runs on any ABI.
