@@ -35,7 +35,7 @@ remote sources and patch an APK:
 | `ThrowableMessages.kt` | cause-chain-aware error messages (`PatchSourceLoadException`) |
 | `model/Release.kt`, `model/PatchesBundle.kt` | provider-agnostic release model + the `patches-bundle.json` manifest |
 | `network/HttpService.kt` | shared GET / HEAD / streaming download with retry and HTTP 429 handling |
-| `patches/*` | `RemotePatchSource` and its GitHub and GitLab implementations, the URL-parsing factory, and the per-bundle loader |
+| `patches/*` | `RemotePatchSource` and its GitHub, GitHub pull request and GitLab implementations, the URL-parsing factory, and the per-bundle loader |
 | `util/BundleFormats.kt` | `.apkm`/`.xapk`/`.apks` detection |
 | `util/KeystoreSigner.kt` | signing with the legacy-alias fallback |
 
@@ -59,7 +59,11 @@ Kept as small as possible so re-syncing stays cheap:
    runs its own pipeline that reads `versionName` (`PatchCommand.kt:630`). We
    patch through this filter unattended, so it has to be right. `Result` now
    carries both `packageVersionName` and `packageVersionCode`.
-2. Nothing else. All other files are byte-identical to upstream.
+2. **`patches/PullRequestPatchSource.kt` - GitHub PAT comes from the
+   environment only.** Upstream reads it from the desktop app's
+   `ConfigRepository` (`app.morphe.gui`), which isn't vendored, then falls back
+   to `GITHUB_TOKEN` / `GH_TOKEN`. We keep just the env fallback.
+3. Nothing else. All other files are byte-identical to upstream.
 
 ## Re-syncing
 
