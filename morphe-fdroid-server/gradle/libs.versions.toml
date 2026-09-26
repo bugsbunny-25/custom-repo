@@ -37,7 +37,7 @@ mockk = "1.14.11"
 # When bumping: re-read morphe-desktop's catalog, then re-check the Patch /
 # Option / PatcherConfig / PackageMetadata API surface the engine and
 # app.fdroidserver.patching call into.
-morphe-patcher = "1.13.0"
+morphe-patcher = "1.14.1"
 arsclib = "1.4.0"
 shadow = "9.6.1"
 
