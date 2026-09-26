@@ -15,6 +15,7 @@ with `git apply --directory=`.
 | --- | --- | --- |
 | `0001-filter-on-versionName.patch` | `PatchEngine.kt` filters compatibility on `packageMetadata.versionName` instead of `versionCode`, and `Result` carries both | Upstream compares `versionCode` against `Patch.supportedVersionsFor()`, which returns version *names*. It never bites upstream because its only caller passes `forceCompatibility = true` and the CLI runs a separate pipeline, but this server patches unattended, so every version-scoped patch would be silently skipped. |
 | `0002-pr-source-without-gui-config.patch` | `patches/PullRequestPatchSource.kt` drops the `ConfigRepository` constructor parameter and reads the GitHub PAT from `GITHUB_TOKEN` / `GH_TOKEN` only | Upstream's PAT lookup goes through the desktop GUI's config store (`app.morphe.gui`), which this server doesn't vendor, so the file doesn't compile as-is. |
+| `0003-caller-version-filter.patch` | `PatchEngine.Config` gains an optional `versionFilter`; when set, `filterPatches` asks it whether a patch supports the APK's version instead of checking `Patch.supportedVersionsFor()` | That helper drops `AppTarget(version = null)` and ignores `isExperimental`, so a patch declared as "these versions, plus any other experimentally" was skipped on every unlisted version even when the attachment opted into experimental versions. The server passes `supportsAppVersion` from `app.fdroidserver.patching`. |
 
 ## Adding one
 
