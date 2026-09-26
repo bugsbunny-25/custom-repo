@@ -1,0 +1,51 @@
+--- a/patches/PullRequestPatchSource.kt
++++ b/patches/PullRequestPatchSource.kt
+@@ -9,12 +9,9 @@
+ import app.morphe.engine.model.Release
+ import app.morphe.engine.model.ReleaseAsset
+ import app.morphe.engine.network.HttpService
+-import app.morphe.gui.data.model.AppConfig
+-import app.morphe.gui.data.repository.ConfigRepository
+ import java.io.File
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+-import org.koin.core.context.GlobalContext
+ 
+ /**
+  * Remote patch source for GitHub Pull Requests.
+@@ -27,20 +24,12 @@
+     val owner: String,
+     val repo: String,
+     val prNumber: String,
+-    private val configRepository: ConfigRepository? = null,
+ ) : GitHubPatchSource(http, "$owner/$repo") {
+ 
+     override val provider: PatchProvider = PatchProvider.GITHUB_PR
+ 
+     private var cachedRelease: Release? = null
+ 
+-    private suspend fun getConfig(): AppConfig {
+-        val repo = configRepository
+-            ?: runCatching { GlobalContext.get().get<ConfigRepository>() }.getOrNull()
+-            ?: ConfigRepository()
+-        return repo.loadConfig()
+-    }
+-
+     override suspend fun listReleases(): Result<List<Release>> = withContext(Dispatchers.IO) {
+         try {
+             cachedRelease?.let { return@withContext Result.success(listOf(it)) }
+@@ -65,10 +54,10 @@
+         }
+     }
+ 
+-    private suspend fun getGitHubPat(): String? {
+-        val config = getConfig()
+-        return config.gitHubPat.trim().takeIf { it.isNotEmpty() }
+-            ?: System.getenv("GITHUB_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
++    // Local delta: upstream reads the PAT from the desktop app's ConfigRepository
++    // (app.morphe.gui), which isn't vendored. The server only has the env vars.
++    private fun getGitHubPat(): String? {
++        return System.getenv("GITHUB_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
+             ?: System.getenv("GH_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
+     }
+ 

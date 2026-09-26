@@ -14,6 +14,7 @@ with `git apply --directory=`.
 | File | What it changes | Why |
 | --- | --- | --- |
 | `0001-filter-on-versionName.patch` | `PatchEngine.kt` filters compatibility on `packageMetadata.versionName` instead of `versionCode`, and `Result` carries both | Upstream compares `versionCode` against `Patch.supportedVersionsFor()`, which returns version *names*. It never bites upstream because its only caller passes `forceCompatibility = true` and the CLI runs a separate pipeline, but this server patches unattended, so every version-scoped patch would be silently skipped. |
+| `0002-pr-source-without-gui-config.patch` | `patches/PullRequestPatchSource.kt` drops the `ConfigRepository` constructor parameter and reads the GitHub PAT from `GITHUB_TOKEN` / `GH_TOKEN` only | Upstream's PAT lookup goes through the desktop GUI's config store (`app.morphe.gui`), which this server doesn't vendor, so the file doesn't compile as-is. |
 
 ## Adding one
 
