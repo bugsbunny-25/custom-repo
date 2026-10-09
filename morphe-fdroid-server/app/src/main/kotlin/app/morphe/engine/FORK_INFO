@@ -1,9 +1,9 @@
 Upstream:  https://github.com/MorpheApp/morphe-desktop
-Tag:       v1.18.0
-Commit:    9bc059777b21b5f33fa8323b0b364bc92222b637
+Tag:       v1.18.1
+Commit:    e6c133010c866d56f074abea7bd0a3bf4f8f9a93
 Path:      src/main/kotlin/app/morphe/engine
-Vendored:  2026-10-04
-Patcher:   app.morphe:morphe-patcher 1.15.0 (matches morphe-desktop's own catalog pin)
+Vendored:  2026-10-08
+Patcher:   app.morphe:morphe-patcher 1.15.1 (matches morphe-desktop's own catalog pin)
 
 See README.md in this directory for what was taken, what was left behind, and
 the list of local deltas to re-apply when re-syncing.

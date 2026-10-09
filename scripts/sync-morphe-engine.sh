@@ -90,9 +90,15 @@ echo "copied $copied file(s)"
 # since a pulled-in file can depend on yet another new one. Only type
 # declarations are matched, and comments are ignored, so a desktop-only file
 # isn't dragged in because a vendored comment happens to mention it.
-declared_types() { # the class/object/interface/typealias names a .kt file declares
+declared_types() { # the class/object/interface/typealias names a .kt file declares,
+                   # plus its public top-level functions (v1.18.0's
+                   # PatchEngine started calling the extension function
+                   # File.deleteRecursivelyInParallel from a new util file that
+                   # declares no type, and the sync PR failed to compile)
   grep -oE '^[[:space:]]*((public|internal|private|sealed|data|enum|abstract|open|annotation|value|inline|fun)[[:space:]]+)*(class|object|interface|typealias)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$1" \
-    | awk '{print $NF}' | sort -u
+    | awk '{print $NF}'
+  grep -E '^((public|internal|inline|suspend|operator|infix)[[:space:]]+)*fun[[:space:]]' "$1" \
+    | sed -nE 's/\(.*//; s/^.*[[:space:].>]([A-Za-z_][A-Za-z0-9_]*)$/\1/p'
 }
 vendored_code() { # every vendored .kt file, minus comment lines
   find "$LOCAL_ENGINE_DIR" -name '*.kt' -type f -exec cat {} + \
