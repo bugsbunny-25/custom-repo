@@ -38,6 +38,7 @@ remote sources and patch an APK:
 | `patches/*` | `RemotePatchSource` and its GitHub, GitHub pull request and GitLab implementations, the URL-parsing factory, and the per-bundle loader |
 | `util/BundleFormats.kt` | `.apkm`/`.xapk`/`.apks` detection |
 | `util/KeystoreSigner.kt` | signing with the legacy-alias fallback |
+| `util/ParallelDelete.kt` | `File.deleteRecursivelyInParallel()`, used to clear the patching temp dir |
 
 Deliberately **not** vendored: everything tied to the desktop app's own
 environment - `MorpheData`/`CacheManager`/`PatchCache` (per-user data dirs),
@@ -82,7 +83,7 @@ actually changed, opens a PR with the files re-copied, the deltas re-applied,
 A release that doesn't touch the engine produces no PR.
 
 The sync only refreshes files already vendored, with one exception: when a
-vendored file references a type declared in a file new upstream, that file is
+vendored file references a type or public top-level function declared in a file new upstream, that file is
 pulled in too (repeatedly, so its own new dependencies follow), and the PR
 calls it out. New upstream files nothing here uses are left behind.
 
