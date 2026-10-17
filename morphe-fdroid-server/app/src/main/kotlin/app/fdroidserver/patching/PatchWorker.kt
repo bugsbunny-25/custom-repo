@@ -10,6 +10,7 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 
@@ -276,13 +277,21 @@ object PatchWorkerEntryPoint {
             // memory-spiky as patching itself - this is exactly why it (like
             // the download above) runs here, in the unbounded-heap worker,
             // rather than in PatchScheduler's admin-server process.
+            //
+            // Built under a temporary name and moved into place only once
+            // complete: preparedApk is reused by later jobs for the same
+            // version, so a worker killed mid-merge (OOM, timeout) must not
+            // leave a truncated file under that name for them to patch.
             val bundleMerger = BundleMerger()
+            val partial = File(workDir, "prepared.apk.part")
             if (bundleMerger.isBundle(rawFile)) {
-                bundleMerger.merge(rawFile, preparedApk)
+                bundleMerger.merge(rawFile, partial)
                 rawFile.delete()
             } else {
-                rawFile.renameTo(preparedApk)
+                Files.move(rawFile.toPath(), partial.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
+            preparedApk.parentFile?.mkdirs()
+            Files.move(partial.toPath(), preparedApk.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
 
         // Checked on every run, not only after a fresh download, so an APK

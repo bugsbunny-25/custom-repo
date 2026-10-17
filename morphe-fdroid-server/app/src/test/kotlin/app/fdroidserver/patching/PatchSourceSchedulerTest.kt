@@ -109,6 +109,28 @@ class PatchSourceSchedulerTest {
         assertEquals(a, bareScheduler().selectPatchAsset(release("v9.9.9", a, b), listOf(a, b)))
     }
 
+    // ---- downgrade guard (pure, no network) -------------------------------
+
+    private fun sourceEntry(version: String) = AppConfig.PatchLibrarySourceEntry(
+        id = "yt-ads", sourceUrl = "https://github.com/o/r", includePrereleases = true, lastReleaseId = "", version = version,
+    )
+
+    @Test
+    fun `a release older than the imported bundle is refused`() {
+        val s = bareScheduler()
+        assertTrue(s.isOlderThanImported(sourceEntry("1.3.0"), release("v1.3.0-dev.2")))
+        assertTrue(s.isOlderThanImported(sourceEntry("v1.3.0"), release("v1.2.9")))
+    }
+
+    @Test
+    fun `a newer or first release is imported`() {
+        val s = bareScheduler()
+        assertFalse(s.isOlderThanImported(sourceEntry("1.3.0"), release("v1.4.0-dev.1")))
+        assertFalse(s.isOlderThanImported(sourceEntry(""), release("v0.1.0")))
+        // Versions that can't be ordered are let through.
+        assertFalse(s.isOlderThanImported(sourceEntry("latest"), release("v1.0.0")))
+    }
+
     // ---- GitHub ------------------------------------------------------------
 
     @Test

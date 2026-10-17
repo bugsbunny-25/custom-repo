@@ -73,4 +73,61 @@ class AppVersionSupportTest {
         val universal = bytecodePatch(name = "Universal") {}
         assertTrue(universal.supportsAppVersion(pkg, "1.0", includeExperimental = false))
     }
+
+    // --- mergedPatchableVersions -----------------------------------------
+
+    private fun support(vararg versions: String, experimental: List<String> = emptyList(), any: Boolean = false) =
+        AppVersionSupport(versions.toList() + experimental, experimental, anyVersion = any, anyVersionExperimental = false)
+
+    @Test
+    fun `an any-version patch doesn't widen what the version-restricted patches support`() {
+        val merged = AppVersionSupport.mergedPatchableVersions(
+            listOf(support(any = true), support("20.4", "20.5"), support("20.4", "20.5")),
+            includeExperimental = false,
+        )
+        assertEquals(listOf("20.4", "20.5"), merged)
+    }
+
+    @Test
+    fun `versions most patches support win`() {
+        val merged = AppVersionSupport.mergedPatchableVersions(
+            listOf(support("20.4", "20.5", "20.6"), support("20.4", "20.5", "20.6"), support("20.4", "20.5")),
+            includeExperimental = false,
+        )
+        assertEquals(listOf("20.4", "20.5"), merged)
+    }
+
+    @Test
+    fun `only any-version patches yield the wildcard`() {
+        assertEquals(listOf("*"), AppVersionSupport.mergedPatchableVersions(listOf(support(any = true)), false))
+    }
+
+    @Test
+    fun `experimental versions join the merge only when included`() {
+        val supports = listOf(support("20.4", experimental = listOf("20.6")), support("20.4", experimental = listOf("20.6")))
+        assertEquals(listOf("20.4"), AppVersionSupport.mergedPatchableVersions(supports, includeExperimental = false))
+        assertEquals(listOf("20.4", "20.6"), AppVersionSupport.mergedPatchableVersions(supports, includeExperimental = true))
+    }
+
+    @Test
+    fun `experimental-only patches yield nothing without the opt-in`() {
+        val supports = listOf(support(experimental = listOf("20.6")))
+        assertTrue(AppVersionSupport.mergedPatchableVersions(supports, includeExperimental = false).isEmpty())
+    }
+
+    @Test
+    fun `most patches accepting any version experimentally opens every version when included`() {
+        val anyExperimental = AppVersionSupport(listOf("20.4"), emptyList(), anyVersion = false, anyVersionExperimental = true)
+        val supports = listOf(anyExperimental, anyExperimental, support("20.4"))
+        assertEquals(listOf("*"), AppVersionSupport.mergedPatchableVersions(supports, includeExperimental = true))
+        // Without the opt-in they're limited to what they name.
+        assertEquals(listOf("20.4"), AppVersionSupport.mergedPatchableVersions(supports, includeExperimental = false))
+    }
+
+    @Test
+    fun `a minority accepting any version experimentally doesn't widen the list`() {
+        val anyExperimental = AppVersionSupport(listOf("20.4"), emptyList(), anyVersion = false, anyVersionExperimental = true)
+        val supports = listOf(anyExperimental, support("20.4", "20.5"), support("20.4", "20.5"))
+        assertEquals(listOf("20.4"), AppVersionSupport.mergedPatchableVersions(supports, includeExperimental = true))
+    }
 }

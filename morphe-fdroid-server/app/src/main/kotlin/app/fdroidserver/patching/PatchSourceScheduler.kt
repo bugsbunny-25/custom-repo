@@ -8,6 +8,8 @@ import app.morphe.engine.patches.RemotePatchSource
 import app.morphe.engine.patches.RemotePatchSourceFactory
 import io.ktor.client.HttpClient
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -74,6 +76,13 @@ class PatchSourceScheduler(
         }
 
         if (isAlreadyImported(entry, latest)) return false
+        if (isOlderThanImported(entry, latest)) {
+            logger.warn(
+                "${entry.id}: latest release on ${entry.sourceUrl} is ${latest.getVersion()}, older than the " +
+                    "imported ${entry.version} (pre-releases ${if (entry.includePrereleases) "on" else "off"}), keeping ${entry.version}",
+            )
+            return false
+        }
 
         val patchAssets = latest.assets.filter { it.isPatchFile() }
         if (patchAssets.isEmpty()) {
@@ -104,12 +113,13 @@ class PatchSourceScheduler(
             }
 
             val destination = File(patchesDir, storedName)
-            // Copy-then-delete (rather than tmpFile.renameTo(destination))
-            // so a failure here can't leave destination half-written; the
-            // existing, previously-imported .mpp is only replaced once the
-            // download above has fully succeeded.
+            // The existing, previously-imported .mpp is only replaced once
+            // the download above has fully succeeded, and in one atomic
+            // rename (tmpFile sits in the same directory): a copy could be
+            // read half-written by a patch worker loading the bundle at the
+            // same moment, e.g. after "Check source now" during a patch run.
             destination.parentFile?.mkdirs()
-            tmpFile.copyTo(destination, overwrite = true)
+            Files.move(tmpFile.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
         } catch (e: Exception) {
             logger.error("${entry.id}: error importing ${asset.name} from ${entry.sourceUrl}: $e")
             return false
@@ -126,13 +136,16 @@ class PatchSourceScheduler(
                 false
             }
             is AppConfig.Result.Ok -> {
-                // Same follow-up as a manual re-upload via the admin UI: the
-                // new .mpp may add/remove/rename sub-patches or options, so
-                // stale per-target overrides and cached processed versions
-                // could reference things that no longer exist / need
-                // re-checking against the new file.
-                appConfig.resetPatchCustomizations(schema, entry.id)
-                appConfig.invalidatePatchCache(schema, entry.id)
+                // Unlike a manual re-upload, an automatic update keeps both the
+                // per-target patch selection/options and the patched-version
+                // history. The selection is matched by patch name and unknown
+                // names/options are ignored (see PatchSelector), so a renamed
+                // or removed patch can't break a run - while wiping it would
+                // silently re-enable every patch the operator turned off, on
+                // every release. And the history is what PatchUpdatePolicy
+                // compares the new bundle version against: the newest app
+                // version is re-patched once because the bundle moved up,
+                // instead of every listed version looking unpatched again.
                 logger.info("${entry.id}: imported ${latest.tagName} from ${entry.sourceUrl} (asset: ${asset.name})")
                 true
             }
@@ -181,6 +194,18 @@ class PatchSourceScheduler(
         if (entry.lastReleaseId.isBlank()) return false
         if (entry.lastReleaseId == release.tagName) return true
         return release.id != 0L && entry.lastReleaseId == release.id.toString()
+    }
+
+    /**
+     * Whether [release] would be a downgrade from the version already
+     * imported for [entry] - e.g. a `dev` manifest that lags behind a stable
+     * release, or pre-releases switched off after a pre-release was
+     * imported. Bundles only ever move up; versions that can't be ordered
+     * are let through.
+     */
+    internal fun isOlderThanImported(entry: AppConfig.PatchLibrarySourceEntry, release: Release): Boolean {
+        if (entry.version.isBlank()) return false
+        return VersionOrder.compare(release.getVersion(), entry.version.removePrefix("v"))?.let { it < 0 } == true
     }
 
     /** Picks which asset to import when a release has more than one `.mpp`

@@ -1,5 +1,6 @@
 package app.fdroidserver.fdroidrepo
 
+import app.fdroidserver.patching.VersionOrder
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
@@ -44,5 +45,21 @@ class FdroidRepoManagerTest {
         )
         val metadata = FdroidRepoManager().readRepoMetadata(tempDir)
         assertEquals(FdroidRepoManager.RepoMetadata("My Repo", "desc", "https://example.com/fdroid/repo", ""), metadata)
+    }
+
+    @Test
+    fun `pruneOldVersions keeps the newest files by the given version order`(@TempDir tempDir: File) {
+        val names = listOf("app__p__26.5.1+rc1-2026.04.08", "app__p__26.5.2+rc1-2026.04.08", "app__p__26.4.9+rc1-2026.03.01")
+        names.forEach { File(tempDir, "$it.apk").writeText("x") }
+
+        FdroidRepoManager().pruneOldVersions(
+            tempDir, 2,
+            versionOrder = { a, b ->
+                VersionOrder.compare(a.nameWithoutExtension.substringAfterLast("__"), b.nameWithoutExtension.substringAfterLast("__"))!!
+            },
+        ) { "app__p" }
+
+        val left = tempDir.listFiles()!!.map { it.nameWithoutExtension }.toSet()
+        assertEquals(setOf("app__p__26.5.1+rc1-2026.04.08", "app__p__26.5.2+rc1-2026.04.08"), left)
     }
 }

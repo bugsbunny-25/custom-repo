@@ -236,9 +236,39 @@ so this matches the desktop app exactly:
   this build ships Y" message the desktop app shows — rather than being
   installed and turning every later patch run into a link error.
 
-Importing a new `.mpp` has exactly the same consequences as re-uploading one
-by hand: cached results are invalidated and per-app overrides are reset.
-**"Check source now"** on an entry runs the check immediately.
+Importing a new `.mpp` keeps each app's sub-patch/option overrides and its
+patched-version history (unlike a manual re-upload); the newer bundle version
+alone is what makes the next check re-patch the app's newest version - see
+below. **"Check source now"** on an entry runs the check immediately.
+
+### When an app is (re-)patched
+
+For each app/patch attachment, the newest published **(app version, patch
+bundle version)** pair is remembered, and a scheduled check only patches
+again when one of them moves up:
+
+- a listed app version newer than the stored one is patched (the highest
+  qualifying version, not whichever the feed lists first);
+- the stored app version is re-patched once when the attachment's patch
+  bundle version goes up;
+- nothing older than the stored app version is picked, even if APKMirror
+  re-lists it. Pinned `supported_versions` are the exception: each pinned
+  version is patched once per bundle version;
+- a version skipped because it can't run on arm64-v8a stays skipped (delete
+  its entry to retry);
+- a failed attempt is retried after 6 hours, or straight away with
+  **Patch Now**, instead of re-downloading the APK on every check. A failed
+  re-patch never touches the APK already published for that version, and a
+  run where no patch applied publishes nothing;
+- a patch bundle source never moves an entry to an older release (for
+  example a `dev` manifest that lags behind a stable release).
+
+Without pinned versions, the versions a bundle supports are the ones most of
+its enabled patches declare for the app. A patch that runs on any version,
+like a branding patch, doesn't widen that list. With **include experimental
+versions** on, any version is accepted when most of the patches accept any
+version experimentally. A `*` or glob pattern (`20.40.*`) doesn't match the
+app's own alpha/beta builds; pin a beta exactly to patch it.
 
 The GitHub token from the Settings tab (the same one the GitHub tab uses)
 raises the rate limit for GitHub-hosted sources. It is attached to GitHub

@@ -6,6 +6,13 @@ import app.fdroidserver.config.AppConfig
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
 import app.fdroidserver.scraper.ScraperClient
 import java.io.File
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.time.Duration
+import java.time.Instant
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -48,7 +55,20 @@ class PatchScheduler(
      * the worker builds its own [ApkMirrorClient]/[ApkPureClient] instances
      * in a fresh process, so it can't share this process's client objects. */
     private var flareSolverrUrl: String? = null
-    suspend fun checkForUpdates(): Boolean {
+
+    /** When each (target, patch, app version, bundle version) last failed to
+     * patch - see [FAILED_RETRY_INTERVAL]. In memory only: a restart retries. */
+    private val recentFailures = java.util.concurrent.ConcurrentHashMap<String, Instant>()
+
+    private fun failureKey(targetId: String, patchId: String, version: String, bundleVersion: String) =
+        "$targetId::$patchId::$version::$bundleVersion"
+    /** Serializes every run of this scheduler: the background loop, "Patch
+     * now", "Patch all" and "Patch specific version" otherwise ran side by
+     * side, patching the same target twice and deleting each other's
+     * prepared APK out from under the worker. */
+    private val runLock = Mutex()
+
+    suspend fun checkForUpdates(): Boolean = runLock.withLock {
         refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById(schema)
         val targets = appConfig.listEnabledPatchTargets(schema)
@@ -60,7 +80,7 @@ class PatchScheduler(
 
         if (anyUpdated) publishUpdates()
         logger.info("Patch update check completed")
-        return anyUpdated
+        anyUpdated
     }
 
     /** Pulls the current FlareSolverr URL out of Settings and hands it to
@@ -93,18 +113,20 @@ class PatchScheduler(
      * [targetId] - used by the admin UI's "Patch now" button, as opposed to
      * [checkForUpdates]'s scheduled sweep over every enabled target. Returns
      * whether a new patched version was published. */
-    suspend fun runTargetNow(targetId: String): Boolean {
+    suspend fun runTargetNow(targetId: String): Boolean = runLock.withLock {
         refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById(schema)
         val target = appConfig.listEnabledPatchTargets(schema).firstOrNull { it.id == targetId }
         if (target == null) {
             logger.warn("$targetId: not found or not enabled, skipping manual patch run")
-            return false
+            return@withLock false
         }
 
-        val updated = checkEnabledTarget(target, library)
+        // A manual run retries a recent failure straight away - the operator
+        // is presumably clicking because they fixed something.
+        val updated = checkEnabledTarget(target, library, retryRecentFailures = true)
         if (updated) publishUpdates()
-        return updated
+        updated
     }
 
     /** Patches a single [target] at a user-specified [versionPageUrl] and
@@ -120,21 +142,21 @@ class PatchScheduler(
      * version page or an APKPure `/download/{version}` page - the source is
      * detected from the URL host so either works. Returns whether anything was
      * published. */
-    suspend fun runSpecificVersion(targetId: String, version: String, versionPageUrl: String): Boolean {
+    suspend fun runSpecificVersion(targetId: String, version: String, versionPageUrl: String): Boolean = runLock.withLock {
         refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById(schema)
         val target = appConfig.listEnabledPatchTargets(schema).firstOrNull { it.id == targetId }
         if (target == null) {
             logger.warn("$targetId: not found or not enabled, skipping specific-version patch run")
-            return false
+            return@withLock false
         }
         if (target.patches.isEmpty()) {
             logger.info("${target.id}: no patches attached, skipping specific-version patch run")
-            return false
+            return@withLock false
         }
 
         val source = sourceForUrl(versionPageUrl)
-        val preparedApkPath = File(tmpDir, "${target.id}-$version-prepared.apk")
+        val preparedApkPath = preparedApkPathFor(target.id, version)
 
         var updated = false
         try {
@@ -161,21 +183,41 @@ class PatchScheduler(
         }
 
         if (updated) publishUpdates()
-        return updated
+        updated
     }
+
+    /** Per-(target, version) path for the downloaded/merged APK, shared by
+     * every attachment patched at that version in one run. Prefixed with the
+     * repo directory's name because the phone and TV schedulers share
+     * [tmpDir] and run at the same time, and target ids are only unique
+     * within one of them. */
+    private fun preparedApkPathFor(targetId: String, version: String): File =
+        File(tmpDir, "${patchedRepoDir.name}-$targetId-${fileSafe(version)}-prepared.apk")
 
     private fun publishUpdates() {
         fdroidRepoManager.updateIndex(patchedRepoDir)
-        fdroidRepoManager.pruneOldVersions(File(patchedRepoDir, "repo"), MAX_VERSIONS_PER_APP) { file ->
+        fdroidRepoManager.pruneOldVersions(
+            File(patchedRepoDir, "repo"), MAX_VERSIONS_PER_APP,
+            // Same ordering as the update policy: plain dot-splitting ranked
+            // "26.5.1+rc1-..." and "26.5.2+rc1-..." as equal, so the newest
+            // build could be the one deleted. Unorderable ones fall back to
+            // file age.
+            versionOrder = { a, b ->
+                VersionOrder.compare(versionOf(a), versionOf(b)) ?: a.lastModified().compareTo(b.lastModified())
+            },
+        ) { file ->
             // Filenames are {targetId}__{patchId}__{version}.apk - group by the
             // (targetId, patchId) prefix so cleanup is independent per version.
             file.nameWithoutExtension.split("__").take(2).joinToString("__")
         }
     }
 
+    private fun versionOf(apk: File): String = apk.nameWithoutExtension.substringAfterLast("__")
+
     private suspend fun checkEnabledTarget(
         target: AppConfig.EnabledPatchTarget,
         library: Map<String, AppConfig.PatchLibraryEntry>,
+        retryRecentFailures: Boolean = false,
     ): Boolean {
         if (target.apkmirrorUrl.isBlank()) {
             logger.warn("${target.id}: no apkmirror_url configured, skipping")
@@ -186,14 +228,18 @@ class PatchScheduler(
             return false
         }
 
+        // An APKMirror failure (a Cloudflare challenge, usually) no longer
+        // ends the check: the APKPure fallback, when configured, is exactly
+        // for versions APKMirror can't give us.
         val versions = try {
             apkMirrorClient.getVersions(target.apkmirrorUrl)
         } catch (e: Exception) {
             logger.error("${target.id}: error fetching apkmirror versions: $e")
-            return false
+            if (target.apkpureUrl.isBlank()) return false
+            emptyList()
         }
 
-        return checkTarget(target, library, versions)
+        return checkTarget(target, library, versions, retryRecentFailures)
     }
 
     /** A candidate version paired with the source that will resolve/download
@@ -204,6 +250,7 @@ class PatchScheduler(
         target: AppConfig.EnabledPatchTarget,
         library: Map<String, AppConfig.PatchLibraryEntry>,
         apkmirrorVersions: List<ScraperClient.VersionEntry>,
+        retryRecentFailures: Boolean,
     ): Boolean {
         var updated = false
         // Stable per-version prepared-APK paths so multiple patch attachments
@@ -243,33 +290,29 @@ class PatchScheduler(
                     continue
                 }
 
-                val processed = appConfig.processedPatchCacheKeys(schema, target.id)
+                // What's already been done for this attachment: the newest
+                // published (app version, bundle version) combo, plus
+                // skipped markers - see PatchUpdatePolicy.
+                val records = appConfig.patchCheckedEntries(schema, target.id)
+                    .filter { it.patchId == attachment.patchId }
+                    .map { PatchUpdatePolicy.Record(it.version, it.patchVersion, it.output) }
 
-                // Whether supportedVersions came from an explicit operator
-                // override (attachment.supportedVersions, set via the admin
-                // UI) or was derived from the .mpp file's own declared
-                // compatibility list - the latter is the patch author's
-                // "known to work with" list, not a deliberate per-target pin,
-                // and can include many old historical versions. Matters below:
-                // an explicit override's pins are always honored regardless of
-                // how old they are (the operator asked for exactly that
-                // version), but the derived list's entries are only matched if
-                // they're not older than a version already successfully
-                // patched for this attachment (see [isOlderVersion]) - without
-                // that check, a version still sitting in APKMirror/APKPure's
-                // listing that just happens not to be in [processed] yet (e.g.
-                // one AKPMirror lists/re-lists out of numeric order - its feed
-                // is ordered by publish time, not by version number) would get
-                // patched even though a newer version of the same attachment
-                // was already published, undoing pruneOldVersions's intent of
-                // keeping only the newest versions around.
+                // An explicit operator override (attachment.supportedVersions,
+                // set via the admin UI) pins exact versions; otherwise the
+                // list comes from the .mpp's own declared compatibility, which
+                // is the patch author's "known to work with" list and can
+                // include many old historical versions.
                 val usingDerivedVersions = attachment.supportedVersions.isEmpty()
-                val derived = if (usingDerivedVersions) deriveSupportedVersions(libEntry, target.packageName) else null
+                val derived = if (usingDerivedVersions) {
+                    deriveSupportedVersions(libEntry, target.packageName, attachment.patchSelection)
+                } else {
+                    null
+                }
                 val supportedVersions = attachment.supportedVersions.ifEmpty {
-                    derived?.patchableVersions(attachment.includeExperimentalVersions).orEmpty()
+                    derived?.let { AppVersionSupport.mergedPatchableVersions(it, attachment.includeExperimentalVersions) }.orEmpty()
                 }
                 if (supportedVersions.isEmpty()) {
-                    if (derived != null && derived.patchableVersions(includeExperimental = true).isNotEmpty()) {
+                    if (derived != null && AppVersionSupport.mergedPatchableVersions(derived, includeExperimental = true).isNotEmpty()) {
                         logger.warn(
                             "${target.id}: the .mpp for patch '${attachment.patchId}' only declares experimental " +
                                 "versions of ${target.packageName}, and the attachment doesn't include experimental versions, skipping",
@@ -280,59 +323,34 @@ class PatchScheduler(
                     continue
                 }
 
-                // Concrete (non-glob) entries are versions the config explicitly
-                // pins, as opposed to a "*"/"1.2.*" pattern that matches whatever
-                // shows up. We don't try to numerically rank these - APKMirror
-                // version strings don't reliably follow one format (calendar
-                // versions, build hashes, "beta"/"rc" suffixes, ...), so "highest"
-                // isn't always well-defined. Once every pinned version has been
-                // patched, stop - don't let the listedCandidate fallback below
-                // walk down to older, already-unprocessed versions just because
-                // they're next in listing order (that used to cause each
-                // subsequent pass to patch a progressively older version, which
-                // then pushed the real latest out of pruneOldVersions's
-                // keep-window).
-                val concreteSupported = supportedVersions.filter { '*' !in it && '?' !in it }
-                if (concreteSupported.isNotEmpty() && concreteSupported.all { "$it::${attachment.patchId}" in processed }) {
-                    continue
+                // Picks the highest listed version the policy allows (newer
+                // than the stored combo's app version, or the same one with a
+                // newer bundle) - not the first one in listing order, since
+                // APKMirror's feed is ordered by publish time.
+                fun pick(list: List<ScraperClient.VersionEntry>): ScraperClient.VersionEntry? {
+                    val matching = list.filter { matchesSupportedVersion(it.version, supportedVersions) }
+                    val chosen = PatchUpdatePolicy.selectVersion(
+                        matching.map { it.version }, records, libEntry.version, pinned = !usingDerivedVersions,
+                    ) ?: return null
+                    return matching.first { it.version == chosen }
                 }
-
-                // Already-processed versions for *this* attachment - only
-                // consulted for usingDerivedVersions below (see its comment
-                // above). Cheap best-effort natural-version comparison
-                // ([isOlderVersion]); when it can't confidently tell, it
-                // returns false (permissive) rather than blocking a
-                // legitimately new release with an unusual version format.
-                val processedVersionsForThisPatch by lazy {
-                    processed.mapNotNull { key ->
-                        key.removeSuffix("::${attachment.patchId}").takeIf { it != key }
-                    }
-                }
-
-                fun matchIn(list: List<ScraperClient.VersionEntry>): ScraperClient.VersionEntry? =
-                    list.firstOrNull { v ->
-                        val cacheKey = "${v.version}::${attachment.patchId}"
-                        cacheKey !in processed &&
-                            matchesSupportedVersion(v.version, supportedVersions) &&
-                            isDerivedCandidateAllowed(v.version, usingDerivedVersions, processedVersionsForThisPatch)
-                    }
 
                 // Prefer APKMirror; only reach for the APKPure fallback (which
-                // is what triggers its lazy fetch) when APKMirror doesn't list
-                // a needed version and an APKPure URL is configured.
-                val listedCandidate = matchIn(apkmirrorVersions)?.let { SourcedCandidate(it, Source.APKMIRROR) }
-                    ?: matchIn(apkpureVersions())?.let { SourcedCandidate(it, Source.APKPURE) }
+                // is what triggers its lazy fetch) when APKMirror has nothing
+                // to patch and an APKPure URL is configured.
+                val listedCandidate = pick(apkmirrorVersions)?.let { SourcedCandidate(it, Source.APKMIRROR) }
+                    ?: pick(apkpureVersions())?.let { SourcedCandidate(it, Source.APKPURE) }
 
                 if (listedCandidate == null) {
                     // APKMirror's feed only ever exposes its newest ~10
                     // releases and has no pagination, so a pinned version
-                    // that isn't in it can't be found any other way - unlike
-                    // the old HTML listing this replaced, there's no history
-                    // left to page through. APKPure (when configured) is the
-                    // one extra place to look, so only warn about a pinned
-                    // version once it's absent from both.
-                    concreteSupported
-                        .filterNot { "$it::${attachment.patchId}" in processed }
+                    // that isn't in it can't be found any other way. APKPure
+                    // (when configured) is the one extra place to look, so
+                    // only warn about a never-patched pinned version once
+                    // it's absent from both.
+                    val recordedVersions = records.map { it.version }.toSet()
+                    supportedVersions.filter { '*' !in it && '?' !in it }
+                        .filterNot { it in recordedVersions }
                         .filterNot { pinned ->
                             apkmirrorVersions.any { it.version == pinned } || apkpureVersions().any { it.version == pinned }
                         }
@@ -343,14 +361,32 @@ class PatchScheduler(
                                     "not in apkmirror's feed$alsoApkpure, skipping",
                             )
                         }
+                    PatchUpdatePolicy.latestPublished(records)?.let { latest ->
+                        logger.info(
+                            "${target.id}: '${attachment.patchId}' is up to date " +
+                                "(app ${latest.version}, patches ${latest.patchVersion.ifBlank { "?" }})",
+                        )
+                    }
                 }
 
                 val candidate = listedCandidate ?: continue
 
                 val version = candidate.entry.version
-                logger.info("${target.id}: found new patchable version $version for patch '${attachment.patchId}' (source: ${candidate.source.name.lowercase()})")
+                val failureKey = failureKey(target.id, attachment.patchId, version, libEntry.version)
+                val failedAt = recentFailures[failureKey]
+                if (!retryRecentFailures && failedAt != null && Duration.between(failedAt, Instant.now()) < FAILED_RETRY_INTERVAL) {
+                    logger.info(
+                        "${target.id}: $version with '${attachment.patchId}' ${libEntry.version} failed at $failedAt, " +
+                            "not retrying before ${failedAt.plus(FAILED_RETRY_INTERVAL)}",
+                    )
+                    continue
+                }
+                logger.info(
+                    "${target.id}: patching $version with '${attachment.patchId}' ${libEntry.version} " +
+                        "(source: ${candidate.source.name.lowercase()})",
+                )
 
-                val preparedApkPath = File(tmpDir, "${target.id}-$version-prepared.apk")
+                val preparedApkPath = preparedApkPathFor(target.id, version)
                 preparedApkPaths += preparedApkPath
 
                 if (
@@ -405,12 +441,19 @@ class PatchScheduler(
             return false
         }
 
-        val outputName = "${target.id}__${attachment.patchId}__$version.apk"
+        val outputName = "${target.id}__${attachment.patchId}__${fileSafe(version)}.apk"
         val outputPath = File(patchedRepoDir, "repo/$outputName")
         outputPath.parentFile?.mkdirs()
         val cacheKey = "$version::${attachment.patchId}"
 
-        val workDir = File(tmpDir, "patch-${target.id}-${attachment.patchId}-${System.currentTimeMillis()}")
+        val workDir = File(tmpDir, "patch-${patchedRepoDir.name}-${target.id}-${attachment.patchId}-${System.currentTimeMillis()}")
+        // The worker writes here, and the APK only replaces whatever is in
+        // the repo once it's been checked below. Re-patching a version with a
+        // newer bundle overwrites the published file, so a failed or
+        // mismatched run must never touch it: before, the engine copied its
+        // output straight into the repo and a package-mismatch failure left
+        // the wrong APK there to be indexed.
+        val stagedOutput = File(tmpDir, "staged-${patchedRepoDir.name}-${System.currentTimeMillis()}-$outputName")
 
         val result = try {
             patchWorkerLauncher.apply(
@@ -422,7 +465,7 @@ class PatchScheduler(
                 attachment.patchSelection,
                 attachment.optionOverrides,
                 target.packageName,
-                outputPath,
+                stagedOutput,
                 workDir,
                 signing,
                 forceCompatibility,
@@ -432,15 +475,55 @@ class PatchScheduler(
             workDir.deleteRecursively()
         }
 
+        try {
+            return handleResult(result, target, attachment, libEntry, version, stagedOutput, outputPath, outputName, cacheKey)
+        } finally {
+            stagedOutput.delete()
+        }
+    }
+
+    private suspend fun handleResult(
+        result: PatchApplier.ApplyResult,
+        target: AppConfig.EnabledPatchTarget,
+        attachment: AppConfig.PatchAttachmentView,
+        libEntry: AppConfig.PatchLibraryEntry,
+        version: String,
+        stagedOutput: File,
+        outputPath: File,
+        outputName: String,
+        cacheKey: String,
+    ): Boolean {
+
         return when (result) {
             is PatchApplier.ApplyResult.Success -> {
+                val failureKey = failureKey(target.id, attachment.patchId, version, libEntry.version)
                 if (target.packageName.isNotBlank() && result.packageName != target.packageName) {
                     logger.error("${target.id}: package mismatch for $version (expected ${target.packageName}, got ${result.packageName}), discarding")
-                    outputPath.delete()
+                    recentFailures[failureKey] = Instant.now()
                     return false
                 }
+                // Every selected patch skipped itself (e.g. none supports this
+                // app version) - the "patched" APK would just be the stock app
+                // re-signed, which is worse than publishing nothing.
+                if (result.appliedPatches.isEmpty()) {
+                    logger.error("${target.id}: no patches from '${attachment.patchId}' applied to $version, discarding")
+                    recentFailures[failureKey] = Instant.now()
+                    return false
+                }
+                if (result.versionName.isNotBlank() && result.versionName != version) {
+                    logger.warn(
+                        "${target.id}: downloaded APK reports version ${result.versionName}, " +
+                            "listed as $version - recording it under the listed version",
+                    )
+                }
+                if (!stagedOutput.isFile || stagedOutput.length() == 0L) {
+                    logger.error("${target.id}: patch worker reported success for $version but wrote no APK")
+                    recentFailures[failureKey] = Instant.now()
+                    return false
+                }
+                moveIntoRepo(stagedOutput, outputPath)
                 logger.info(
-                    "${target.id}: patched $version with '${attachment.patchId}' " +
+                    "${target.id}: patched $version with '${attachment.patchId}' ${libEntry.version} " +
                         "(${result.appliedPatches.size} patches applied)",
                 )
                 appConfig.recordPatchCheckedEntry(
@@ -452,10 +535,15 @@ class PatchScheduler(
                     patchVersion = libEntry.version,
                     output = outputName,
                 )
+                recentFailures.remove(failureKey)
                 true
             }
             is PatchApplier.ApplyResult.Failure -> {
                 logger.error("${target.id}: morphe patch '${attachment.patchId}' failed for $version: ${result.error}")
+                // Not recorded in the DB (that would hide the APK already
+                // published for this version), only throttled in memory so a
+                // persistent failure doesn't re-download the APK every run.
+                recentFailures[failureKey(target.id, attachment.patchId, version, libEntry.version)] = Instant.now()
                 false
             }
             is PatchApplier.ApplyResult.Unsupported -> {
@@ -470,21 +558,36 @@ class PatchScheduler(
                     version = version,
                     patchId = attachment.patchId,
                     patchVersion = libEntry.version,
-                    output = "skipped: ${result.reason}",
+                    output = PatchUpdatePolicy.SKIPPED_PREFIX + result.reason,
                 )
                 false
             }
         }
     }
 
+    /** Replaces [destination] in one step where the filesystem allows it, so
+     * the F-Droid index never sees a half-copied APK. */
+    private fun moveIntoRepo(source: File, destination: File) {
+        try {
+            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } catch (e: AtomicMoveNotSupportedException) {
+            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
+
     /** When an attachment doesn't specify supported_versions, fall back to
-     * whatever the .mpp file itself declares (via [PatchLibrary]) for the
-     * target's package_name - null when the file can't be read or doesn't
-     * name the package. Which of those versions are patched (stable only, or
-     * experimental too) is up to the attachment - see
-     * [AppVersionSupport.patchableVersions]. A patch that doesn't restrict
-     * the version at all yields the `"*"` pattern. */
-    private fun deriveSupportedVersions(libEntry: AppConfig.PatchLibraryEntry, packageName: String): AppVersionSupport? {
+     * what the .mpp file itself declares (via [PatchLibrary]) for the
+     * target's package_name: one [AppVersionSupport] per patch that names the
+     * package and is enabled under [selection] (the attachment's
+     * patch_selection, else the patch's own default) - null when the file
+     * can't be read or no enabled patch names the package. They're combined
+     * by [AppVersionSupport.mergedPatchableVersions], which also applies the
+     * attachment's experimental opt-in. */
+    private fun deriveSupportedVersions(
+        libEntry: AppConfig.PatchLibraryEntry,
+        packageName: String,
+        selection: Map<String, Boolean>,
+    ): List<AppVersionSupport>? {
         val patchFile = File(patchesDir, libEntry.file)
         if (!patchFile.exists()) return null
 
@@ -495,81 +598,51 @@ class PatchScheduler(
             return null
         }
 
-        for (patch in patches) {
-            for (pkg in patch.packages) {
-                if (packageName.isNotBlank() && pkg.packageName != packageName) continue
-                return pkg.toVersionSupport()
-            }
-        }
-        return null
+        // Without a configured package name, fall back to the first package
+        // the bundle names, as before.
+        val pkgName = packageName.ifBlank { patches.firstNotNullOfOrNull { it.packages.firstOrNull()?.packageName } }
+            ?: return null
+        val supports = patches
+            .filter { patch -> patch.name?.let { selection[it] } ?: patch.enabled }
+            .mapNotNull { patch -> patch.packages.firstOrNull { it.packageName == pkgName }?.toVersionSupport() }
+        return supports.ifEmpty { null }
     }
 
-    private fun matchesSupportedVersion(version: String, supportedVersions: List<String>): Boolean {
+    /** An exact entry matches only itself; a `*`/glob pattern matches any
+     * version except the app's own alpha/beta builds (APKMirror's feed lists
+     * them as e.g. "20.41.33 beta"), which would otherwise rank above the
+     * current stable release and get patched whenever a bundle accepts any
+     * version. Pin a beta explicitly to patch it. */
+    internal fun matchesSupportedVersion(version: String, supportedVersions: List<String>): Boolean {
         if (supportedVersions.isEmpty()) return false
         return supportedVersions.any { pattern ->
-            pattern == "*" || pattern == version || globToRegex(pattern).matches(version)
+            pattern == version ||
+                (!PRE_RELEASE_RE.containsMatchIn(version) && (pattern == "*" || globToRegex(pattern).matches(version)))
         }
     }
 
-    private fun globToRegex(glob: String): Regex {
-        val escaped = Regex.escape(glob).replace("\\*", ".*").replace("\\?", ".")
-        return Regex(escaped)
-    }
+    /** Keeps a version string usable as part of a file name - the
+     * "Patch specific version" form takes it as free text. */
+    private fun fileSafe(version: String): String = version.replace(UNSAFE_FILE_CHARS_RE, "_")
 
-    /** Gate applied to a version-list match before it's accepted as a
-     * candidate in [checkTarget]'s `matchIn` - pulled out into its own
-     * function (rather than left inline) so it's directly unit-testable
-     * without a network call or DB, the same reasoning [ApkMirrorClient]'s
-     * `internal fun parseFeedVersions`/`pickBestVariantHref` are pulled out
-     * for. An explicit admin-pinned `supportedVersions` list
-     * ([usingDerivedVersions] false) is always honored regardless of version
-     * order - the operator asked for exactly that version. A derived
-     * (non-pinned, `.mpp`-declared) match is only accepted if it isn't
-     * [isOlderVersion] than anything in [alreadyProcessedVersions] - see
-     * [checkTarget]'s comment on [usingDerivedVersions] for why. */
-    internal fun isDerivedCandidateAllowed(
-        candidateVersion: String,
-        usingDerivedVersions: Boolean,
-        alreadyProcessedVersions: Collection<String>,
-    ): Boolean = !usingDerivedVersions || alreadyProcessedVersions.none { isOlderVersion(candidateVersion, it) }
-
-    /** Best-effort "is [candidate] an older release than [processed]" check -
-     * used by [isDerivedCandidateAllowed] to stop a derived (non-pinned)
-     * supported-versions match from regressing past a version already
-     * successfully patched for the same attachment. Splits both strings into
-     * alternating digit/non-digit runs and compares them pairwise (numeric
-     * runs as integers, others as plain strings); returns false - rather than
-     * guessing - the moment the two versions don't decompose into directly
-     * comparable runs (different token counts, or a digit run lined up
-     * against a non-digit one), since APKMirror/APKPure version strings don't
-     * reliably follow one format (see [matchesSupportedVersion]'s callers)
-     * and a wrong "older" guess would silently block a legitimately new
-     * release. */
-    internal fun isOlderVersion(candidate: String, processed: String): Boolean {
-        val a = VERSION_TOKEN_RE.findAll(candidate).map { it.value }.toList()
-        val b = VERSION_TOKEN_RE.findAll(processed).map { it.value }.toList()
-        if (a.isEmpty() || a.size != b.size) return false
-
-        for (i in a.indices) {
-            val (tokenA, tokenB) = a[i] to b[i]
-            val aIsDigits = tokenA[0].isDigit()
-            val bIsDigits = tokenB[0].isDigit()
-            if (aIsDigits != bIsDigits) return false
-
-            val cmp = if (aIsDigits) {
-                val numA = tokenA.toBigIntegerOrNull() ?: return false
-                val numB = tokenB.toBigIntegerOrNull() ?: return false
-                numA.compareTo(numB)
-            } else {
-                tokenA.compareTo(tokenB)
-            }
-            if (cmp != 0) return cmp < 0
-        }
-        return false
-    }
+    /** Regex.escape wraps the whole string in \Q...\E, so replacing an
+     * escaped `\*` in its output (what this used to do) never matched and
+     * every glob other than a bare `*` silently matched nothing. Escape the
+     * literal runs one by one instead. */
+    private fun globToRegex(glob: String): Regex = Regex(
+        glob.split('*').joinToString(".*") { part ->
+            part.split('?').joinToString(".") { literal -> if (literal.isEmpty()) "" else Regex.escape(literal) }
+        },
+    )
 
     companion object {
-        private val VERSION_TOKEN_RE = Regex("""\d+|\D+""")
         private const val MAX_VERSIONS_PER_APP = 3
+        private val PRE_RELEASE_RE = Regex("""(?<![a-z])(alpha|beta)""", RegexOption.IGNORE_CASE)
+        private val UNSAFE_FILE_CHARS_RE = Regex("""[^A-Za-z0-9._+ -]""")
+
+        /** How long a failed (version, bundle version) combo waits before a
+         * scheduled run tries it again, so a broken download or patch doesn't
+         * re-download the APK on every run. "Patch now" ignores it. */
+        private val FAILED_RETRY_INTERVAL: Duration = Duration.ofHours(6)
     }
 }
