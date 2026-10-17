@@ -39,26 +39,38 @@ data class AppVersionSupport(
          * The versions worth patching for a package across every enabled
          * patch in a bundle that names it ([supports], one per patch).
          *
-         * Patches that run on any version don't narrow anything, so only the
-         * version-restricted ones decide; of those, the versions the most
-         * patches support win - the same "recommended version" idea the
-         * Morphe manager uses, and the intersection whenever the patches
-         * agree. Taking the first patch's list instead (what this used to
-         * do) let one "any version" patch, such as a branding patch, open the
-         * door to app versions the main patches don't support; the engine
-         * then silently skipped those and published a mostly unpatched APK.
-         * `"*"` when every patch runs on any version; empty when none of them
-         * can run without the experimental opt-in.
+         * A patch with a stable "any version" target (a branding patch, say)
+         * is version-agnostic, so it neither narrows nor widens the list:
+         * taking the first patch's list instead (what this used to do) let
+         * such a patch open the door to app versions the main patches don't
+         * support, which the engine then silently skipped, publishing a
+         * mostly unpatched APK. Among the rest, when the attachment opts into
+         * experimental versions and most of them accept any version
+         * experimentally, any version goes (`"*"`); otherwise the specific
+         * versions the most patches support win - the "recommended version"
+         * idea the Morphe manager uses, and the intersection whenever the
+         * patches agree. `"*"` when every patch is version-agnostic; empty
+         * when none of them can run without the experimental opt-in.
          */
         fun mergedPatchableVersions(supports: List<AppVersionSupport>, includeExperimental: Boolean): List<String> {
-            val perPatch = supports.map { it.patchableVersions(includeExperimental) }.filter { it.isNotEmpty() }
-            val restricted = perPatch.filter { "*" !in it }
-            if (restricted.isEmpty()) return if (perPatch.isNotEmpty()) listOf("*") else emptyList()
+            val restricting = supports.filterNot { it.anyVersion }
+            if (restricting.isEmpty()) return if (supports.isNotEmpty()) listOf("*") else emptyList()
 
+            val perPatch = restricting
+                .map { it to it.patchableVersions(includeExperimental) }
+                .filter { (_, versions) -> versions.isNotEmpty() }
+            if (perPatch.isEmpty()) return emptyList()
+            val anyExperimental = perPatch.count { (_, versions) -> "*" in versions }
+            if (anyExperimental * 2 > perPatch.size) return listOf("*")
+
+            // A patch that accepts any version experimentally still counts
+            // for every version it names explicitly.
             val counts = LinkedHashMap<String, Int>()
-            for (versions in restricted) {
-                for (v in versions.distinct()) counts[v] = (counts[v] ?: 0) + 1
+            for ((support, versions) in perPatch) {
+                val specific = if ("*" in versions) support.versions else versions
+                for (v in specific.distinct()) counts[v] = (counts[v] ?: 0) + 1
             }
+            if (counts.isEmpty()) return listOf("*")
             val best = counts.values.max()
             return counts.filterValues { it == best }.keys.toList()
         }

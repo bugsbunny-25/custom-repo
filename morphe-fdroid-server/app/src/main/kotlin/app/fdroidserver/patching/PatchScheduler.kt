@@ -6,8 +6,13 @@ import app.fdroidserver.config.AppConfig
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
 import app.fdroidserver.scraper.ScraperClient
 import java.io.File
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.time.Duration
 import java.time.Instant
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -57,7 +62,13 @@ class PatchScheduler(
 
     private fun failureKey(targetId: String, patchId: String, version: String, bundleVersion: String) =
         "$targetId::$patchId::$version::$bundleVersion"
-    suspend fun checkForUpdates(): Boolean {
+    /** Serializes every run of this scheduler: the background loop, "Patch
+     * now", "Patch all" and "Patch specific version" otherwise ran side by
+     * side, patching the same target twice and deleting each other's
+     * prepared APK out from under the worker. */
+    private val runLock = Mutex()
+
+    suspend fun checkForUpdates(): Boolean = runLock.withLock {
         refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById(schema)
         val targets = appConfig.listEnabledPatchTargets(schema)
@@ -69,7 +80,7 @@ class PatchScheduler(
 
         if (anyUpdated) publishUpdates()
         logger.info("Patch update check completed")
-        return anyUpdated
+        anyUpdated
     }
 
     /** Pulls the current FlareSolverr URL out of Settings and hands it to
@@ -102,20 +113,20 @@ class PatchScheduler(
      * [targetId] - used by the admin UI's "Patch now" button, as opposed to
      * [checkForUpdates]'s scheduled sweep over every enabled target. Returns
      * whether a new patched version was published. */
-    suspend fun runTargetNow(targetId: String): Boolean {
+    suspend fun runTargetNow(targetId: String): Boolean = runLock.withLock {
         refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById(schema)
         val target = appConfig.listEnabledPatchTargets(schema).firstOrNull { it.id == targetId }
         if (target == null) {
             logger.warn("$targetId: not found or not enabled, skipping manual patch run")
-            return false
+            return@withLock false
         }
 
         // A manual run retries a recent failure straight away - the operator
         // is presumably clicking because they fixed something.
         val updated = checkEnabledTarget(target, library, retryRecentFailures = true)
         if (updated) publishUpdates()
-        return updated
+        updated
     }
 
     /** Patches a single [target] at a user-specified [versionPageUrl] and
@@ -131,21 +142,21 @@ class PatchScheduler(
      * version page or an APKPure `/download/{version}` page - the source is
      * detected from the URL host so either works. Returns whether anything was
      * published. */
-    suspend fun runSpecificVersion(targetId: String, version: String, versionPageUrl: String): Boolean {
+    suspend fun runSpecificVersion(targetId: String, version: String, versionPageUrl: String): Boolean = runLock.withLock {
         refreshFlareSolverrUrl()
         val library = appConfig.patchLibraryById(schema)
         val target = appConfig.listEnabledPatchTargets(schema).firstOrNull { it.id == targetId }
         if (target == null) {
             logger.warn("$targetId: not found or not enabled, skipping specific-version patch run")
-            return false
+            return@withLock false
         }
         if (target.patches.isEmpty()) {
             logger.info("${target.id}: no patches attached, skipping specific-version patch run")
-            return false
+            return@withLock false
         }
 
         val source = sourceForUrl(versionPageUrl)
-        val preparedApkPath = File(tmpDir, "${target.id}-$version-prepared.apk")
+        val preparedApkPath = preparedApkPathFor(target.id, version)
 
         var updated = false
         try {
@@ -172,17 +183,36 @@ class PatchScheduler(
         }
 
         if (updated) publishUpdates()
-        return updated
+        updated
     }
+
+    /** Per-(target, version) path for the downloaded/merged APK, shared by
+     * every attachment patched at that version in one run. Prefixed with the
+     * repo directory's name because the phone and TV schedulers share
+     * [tmpDir] and run at the same time, and target ids are only unique
+     * within one of them. */
+    private fun preparedApkPathFor(targetId: String, version: String): File =
+        File(tmpDir, "${patchedRepoDir.name}-$targetId-${fileSafe(version)}-prepared.apk")
 
     private fun publishUpdates() {
         fdroidRepoManager.updateIndex(patchedRepoDir)
-        fdroidRepoManager.pruneOldVersions(File(patchedRepoDir, "repo"), MAX_VERSIONS_PER_APP) { file ->
+        fdroidRepoManager.pruneOldVersions(
+            File(patchedRepoDir, "repo"), MAX_VERSIONS_PER_APP,
+            // Same ordering as the update policy: plain dot-splitting ranked
+            // "26.5.1+rc1-..." and "26.5.2+rc1-..." as equal, so the newest
+            // build could be the one deleted. Unorderable ones fall back to
+            // file age.
+            versionOrder = { a, b ->
+                VersionOrder.compare(versionOf(a), versionOf(b)) ?: a.lastModified().compareTo(b.lastModified())
+            },
+        ) { file ->
             // Filenames are {targetId}__{patchId}__{version}.apk - group by the
             // (targetId, patchId) prefix so cleanup is independent per version.
             file.nameWithoutExtension.split("__").take(2).joinToString("__")
         }
     }
+
+    private fun versionOf(apk: File): String = apk.nameWithoutExtension.substringAfterLast("__")
 
     private suspend fun checkEnabledTarget(
         target: AppConfig.EnabledPatchTarget,
@@ -198,11 +228,15 @@ class PatchScheduler(
             return false
         }
 
+        // An APKMirror failure (a Cloudflare challenge, usually) no longer
+        // ends the check: the APKPure fallback, when configured, is exactly
+        // for versions APKMirror can't give us.
         val versions = try {
             apkMirrorClient.getVersions(target.apkmirrorUrl)
         } catch (e: Exception) {
             logger.error("${target.id}: error fetching apkmirror versions: $e")
-            return false
+            if (target.apkpureUrl.isBlank()) return false
+            emptyList()
         }
 
         return checkTarget(target, library, versions, retryRecentFailures)
@@ -352,7 +386,7 @@ class PatchScheduler(
                         "(source: ${candidate.source.name.lowercase()})",
                 )
 
-                val preparedApkPath = File(tmpDir, "${target.id}-$version-prepared.apk")
+                val preparedApkPath = preparedApkPathFor(target.id, version)
                 preparedApkPaths += preparedApkPath
 
                 if (
@@ -407,12 +441,19 @@ class PatchScheduler(
             return false
         }
 
-        val outputName = "${target.id}__${attachment.patchId}__$version.apk"
+        val outputName = "${target.id}__${attachment.patchId}__${fileSafe(version)}.apk"
         val outputPath = File(patchedRepoDir, "repo/$outputName")
         outputPath.parentFile?.mkdirs()
         val cacheKey = "$version::${attachment.patchId}"
 
-        val workDir = File(tmpDir, "patch-${target.id}-${attachment.patchId}-${System.currentTimeMillis()}")
+        val workDir = File(tmpDir, "patch-${patchedRepoDir.name}-${target.id}-${attachment.patchId}-${System.currentTimeMillis()}")
+        // The worker writes here, and the APK only replaces whatever is in
+        // the repo once it's been checked below. Re-patching a version with a
+        // newer bundle overwrites the published file, so a failed or
+        // mismatched run must never touch it: before, the engine copied its
+        // output straight into the repo and a package-mismatch failure left
+        // the wrong APK there to be indexed.
+        val stagedOutput = File(tmpDir, "staged-${patchedRepoDir.name}-${System.currentTimeMillis()}-$outputName")
 
         val result = try {
             patchWorkerLauncher.apply(
@@ -424,7 +465,7 @@ class PatchScheduler(
                 attachment.patchSelection,
                 attachment.optionOverrides,
                 target.packageName,
-                outputPath,
+                stagedOutput,
                 workDir,
                 signing,
                 forceCompatibility,
@@ -434,15 +475,55 @@ class PatchScheduler(
             workDir.deleteRecursively()
         }
 
+        try {
+            return handleResult(result, target, attachment, libEntry, version, stagedOutput, outputPath, outputName, cacheKey)
+        } finally {
+            stagedOutput.delete()
+        }
+    }
+
+    private suspend fun handleResult(
+        result: PatchApplier.ApplyResult,
+        target: AppConfig.EnabledPatchTarget,
+        attachment: AppConfig.PatchAttachmentView,
+        libEntry: AppConfig.PatchLibraryEntry,
+        version: String,
+        stagedOutput: File,
+        outputPath: File,
+        outputName: String,
+        cacheKey: String,
+    ): Boolean {
+
         return when (result) {
             is PatchApplier.ApplyResult.Success -> {
+                val failureKey = failureKey(target.id, attachment.patchId, version, libEntry.version)
                 if (target.packageName.isNotBlank() && result.packageName != target.packageName) {
                     logger.error("${target.id}: package mismatch for $version (expected ${target.packageName}, got ${result.packageName}), discarding")
-                    outputPath.delete()
+                    recentFailures[failureKey] = Instant.now()
                     return false
                 }
+                // Every selected patch skipped itself (e.g. none supports this
+                // app version) - the "patched" APK would just be the stock app
+                // re-signed, which is worse than publishing nothing.
+                if (result.appliedPatches.isEmpty()) {
+                    logger.error("${target.id}: no patches from '${attachment.patchId}' applied to $version, discarding")
+                    recentFailures[failureKey] = Instant.now()
+                    return false
+                }
+                if (result.versionName.isNotBlank() && result.versionName != version) {
+                    logger.warn(
+                        "${target.id}: downloaded APK reports version ${result.versionName}, " +
+                            "listed as $version - recording it under the listed version",
+                    )
+                }
+                if (!stagedOutput.isFile || stagedOutput.length() == 0L) {
+                    logger.error("${target.id}: patch worker reported success for $version but wrote no APK")
+                    recentFailures[failureKey] = Instant.now()
+                    return false
+                }
+                moveIntoRepo(stagedOutput, outputPath)
                 logger.info(
-                    "${target.id}: patched $version with '${attachment.patchId}' " +
+                    "${target.id}: patched $version with '${attachment.patchId}' ${libEntry.version} " +
                         "(${result.appliedPatches.size} patches applied)",
                 )
                 appConfig.recordPatchCheckedEntry(
@@ -454,7 +535,7 @@ class PatchScheduler(
                     patchVersion = libEntry.version,
                     output = outputName,
                 )
-                recentFailures.remove(failureKey(target.id, attachment.patchId, version, libEntry.version))
+                recentFailures.remove(failureKey)
                 true
             }
             is PatchApplier.ApplyResult.Failure -> {
@@ -481,6 +562,16 @@ class PatchScheduler(
                 )
                 false
             }
+        }
+    }
+
+    /** Replaces [destination] in one step where the filesystem allows it, so
+     * the F-Droid index never sees a half-copied APK. */
+    private fun moveIntoRepo(source: File, destination: File) {
+        try {
+            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } catch (e: AtomicMoveNotSupportedException) {
+            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
     }
 
@@ -517,20 +608,37 @@ class PatchScheduler(
         return supports.ifEmpty { null }
     }
 
-    private fun matchesSupportedVersion(version: String, supportedVersions: List<String>): Boolean {
+    /** An exact entry matches only itself; a `*`/glob pattern matches any
+     * version except the app's own alpha/beta builds (APKMirror's feed lists
+     * them as e.g. "20.41.33 beta"), which would otherwise rank above the
+     * current stable release and get patched whenever a bundle accepts any
+     * version. Pin a beta explicitly to patch it. */
+    internal fun matchesSupportedVersion(version: String, supportedVersions: List<String>): Boolean {
         if (supportedVersions.isEmpty()) return false
         return supportedVersions.any { pattern ->
-            pattern == "*" || pattern == version || globToRegex(pattern).matches(version)
+            pattern == version ||
+                (!PRE_RELEASE_RE.containsMatchIn(version) && (pattern == "*" || globToRegex(pattern).matches(version)))
         }
     }
 
-    private fun globToRegex(glob: String): Regex {
-        val escaped = Regex.escape(glob).replace("\\*", ".*").replace("\\?", ".")
-        return Regex(escaped)
-    }
+    /** Keeps a version string usable as part of a file name - the
+     * "Patch specific version" form takes it as free text. */
+    private fun fileSafe(version: String): String = version.replace(UNSAFE_FILE_CHARS_RE, "_")
+
+    /** Regex.escape wraps the whole string in \Q...\E, so replacing an
+     * escaped `\*` in its output (what this used to do) never matched and
+     * every glob other than a bare `*` silently matched nothing. Escape the
+     * literal runs one by one instead. */
+    private fun globToRegex(glob: String): Regex = Regex(
+        glob.split('*').joinToString(".*") { part ->
+            part.split('?').joinToString(".") { literal -> if (literal.isEmpty()) "" else Regex.escape(literal) }
+        },
+    )
 
     companion object {
         private const val MAX_VERSIONS_PER_APP = 3
+        private val PRE_RELEASE_RE = Regex("""(?<![a-z])(alpha|beta)""", RegexOption.IGNORE_CASE)
+        private val UNSAFE_FILE_CHARS_RE = Regex("""[^A-Za-z0-9._+ -]""")
 
         /** How long a failed (version, bundle version) combo waits before a
          * scheduled run tries it again, so a broken download or patch doesn't

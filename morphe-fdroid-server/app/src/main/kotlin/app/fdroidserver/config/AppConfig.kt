@@ -454,6 +454,9 @@ class AppConfig(private val db: AppDatabase) {
          * releases by tag, not by a numeric id, so the tag is the one
          * identifier both providers share). */
         val lastReleaseId: String,
+        /** Version of the `.mpp` currently imported (blank before the first
+         * import) - what a newly found release must not be older than. */
+        val version: String = "",
     )
 
     suspend fun listPatchLibrarySources(schema: PatchSchema): List<PatchLibrarySourceEntry> = db.tx {
@@ -465,6 +468,7 @@ class AppConfig(private val db: AppDatabase) {
                 sourceUrl = url,
                 includePrereleases = row[schema.library.includePrereleases],
                 lastReleaseId = row[schema.library.lastReleaseId],
+                version = row[schema.library.version],
             )
         }
     }

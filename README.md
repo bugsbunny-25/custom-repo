@@ -257,11 +257,18 @@ again when one of them moves up:
 - a version skipped because it can't run on arm64-v8a stays skipped (delete
   its entry to retry);
 - a failed attempt is retried after 6 hours, or straight away with
-  **Patch Now**, instead of re-downloading the APK on every check.
+  **Patch Now**, instead of re-downloading the APK on every check. A failed
+  re-patch never touches the APK already published for that version, and a
+  run where no patch applied publishes nothing;
+- a patch bundle source never moves an entry to an older release (for
+  example a `dev` manifest that lags behind a stable release).
 
 Without pinned versions, the versions a bundle supports are the ones most of
-its enabled, version-restricted patches declare for the app (a patch that
-runs on any version, like a branding patch, doesn't widen that list).
+its enabled patches declare for the app. A patch that runs on any version,
+like a branding patch, doesn't widen that list. With **include experimental
+versions** on, any version is accepted when most of the patches accept any
+version experimentally. A `*` or glob pattern (`20.40.*`) doesn't match the
+app's own alpha/beta builds; pin a beta exactly to patch it.
 
 The GitHub token from the Settings tab (the same one the GitHub tab uses)
 raises the rate limit for GitHub-hosted sources. It is attached to GitHub
