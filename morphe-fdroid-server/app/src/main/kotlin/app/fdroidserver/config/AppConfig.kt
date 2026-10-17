@@ -203,14 +203,13 @@ class AppConfig(private val db: AppDatabase) {
                 )
             }
 
-    /** Matches the old map-based `listRepos`' behavior of only returning
-     * *enabled* repos (disabled ones are hidden from the GitHub tab
-     * entirely). */
+    /** Every repo for the admin UI, paused (disabled) ones included so they
+     * can be found and switched back on. The scheduler uses
+     * [listEnabledGithubRepos] instead. */
     suspend fun listRepos(): List<GithubRepoView> = db.tx {
         val settings = Settings.selectAll().single()
-        GithubRepos.selectAll().orderBy(GithubRepos.id).mapNotNull { row ->
+        GithubRepos.selectAll().orderBy(GithubRepos.id).map { row ->
             val enabled = row[GithubRepos.enabled]
-            if (!enabled) return@mapNotNull null
             val repoId = row[GithubRepos.id]
             GithubRepoView(
                 id = repoId,

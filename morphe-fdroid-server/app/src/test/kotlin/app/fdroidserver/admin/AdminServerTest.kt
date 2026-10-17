@@ -78,7 +78,29 @@ class AdminServerTest {
             application { with(server(tempDir)) { configureServer() } }
             val response = client.get("/admin")
             assertEquals(HttpStatusCode.OK, response.status)
-            assertTrue(response.bodyAsText().contains("<title>Repo Config</title>"))
+            val page = response.bodyAsText()
+            assertTrue(page.contains("<title>Repo Config</title>"))
+            assertTrue(page.contains("/admin/assets/admin.css") && page.contains("/admin/assets/admin.js"), "page should link its assets")
+        }
+    }
+
+    @Test
+    fun `admin assets are served with their content types and nothing else is`(@TempDir tempDir: File) {
+        testApplication {
+            application { with(server(tempDir)) { configureServer() } }
+
+            val css = client.get("/admin/assets/admin.css")
+            assertEquals(HttpStatusCode.OK, css.status)
+            assertTrue(css.headers["Content-Type"]!!.startsWith("text/css"), "got ${css.headers["Content-Type"]}")
+            assertEquals("no-cache", css.headers["Cache-Control"])
+
+            val js = client.get("/admin/assets/admin.js")
+            assertEquals(HttpStatusCode.OK, js.status)
+            assertTrue(js.headers["Content-Type"]!!.startsWith("application/javascript"), "got ${js.headers["Content-Type"]}")
+            assertTrue(js.bodyAsText().contains("/api/repos/check-status"))
+
+            assertEquals(HttpStatusCode.NotFound, client.get("/admin/assets/index.html").status)
+            assertEquals(HttpStatusCode.NotFound, client.get("/admin/assets/logback.xml").status)
         }
     }
 
@@ -105,6 +127,24 @@ class AdminServerTest {
             assertTrue(body.contains(""""repo":"termux/termux-app""""), "expected repo field in: $body")
             assertTrue(body.contains(""""include_prereleases":true"""), "expected snake_case key in: $body")
             assertTrue(body.contains(""""max_releases":5"""), "expected snake_case key in: $body")
+        }
+    }
+
+    @Test
+    fun `paused repos stay listed but can't be checked`(@TempDir tempDir: File) {
+        testApplication {
+            application { with(server(tempDir)) { configureServer() } }
+
+            client.post("/api/repos") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"repo":"termux/termux-app","max_releases":5,"apk_pattern":".*\\.apk$","enabled":false}""")
+            }
+
+            val body = client.get("/api/repos").bodyAsText()
+            assertTrue(body.contains(""""repo":"termux/termux-app""""), "paused repo should be listed: $body")
+            assertTrue(body.contains(""""enabled":false"""), "expected enabled=false in: $body")
+            val id = Regex(""""id":(\d+)""").find(body)!!.groupValues[1]
+            assertEquals(HttpStatusCode.BadRequest, client.post("/api/repos/$id/check").status)
         }
     }
 

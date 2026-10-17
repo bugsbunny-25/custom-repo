@@ -30,9 +30,9 @@ creates `app.db` inside it automatically if it doesn't exist yet:
 On first launch, open the admin UI at `/admin` and complete the one-time
 setup form (repo name, description, and URL - the URL can't be changed
 afterward, since existing F-Droid clients would be pointed at the old one).
-GitHub repos and patch targets start out empty; add them from the GitHub and
-Patching tabs, and adjust every other setting (update interval, GitHub
-token, defaults for new repos, etc.) from the **Settings** tab.
+GitHub repos and patch targets start out empty; add them from the GitHub apps and
+Patched apps pages, and adjust every other setting (update interval, GitHub
+token, defaults for new repos, etc.) from the **Settings** page.
 
 ### 2. Build and Run
 
@@ -145,16 +145,17 @@ The repository will sync and your apps will appear in F-Droid!
 
 ## APK Patching (Morphe + APKMirror)
 
-The admin UI at `/admin` has three tabs:
+The admin UI at `/admin` has a sidebar with **GitHub apps**, **Patched apps**,
+**Patched TV apps**, and **Settings** pages:
 
-- **GitHub** — the original flow described above (monitors GitHub releases).
-- **Patching** — a separate pipeline that watches APKMirror app pages for new
+- **GitHub apps** — the original flow described above (monitors GitHub releases).
+- **Patched apps** — a separate pipeline that watches APKMirror app pages for new
   versions, and when a version matches a patch attached to that app, downloads
   the APK, patches it with Morphe, and publishes the result to its own F-Droid
   repo served at `/patched/repo` (add it as a second repo URL in the F-Droid
   client). Only the newest **3 versions** per (app, patch) pair are kept —
   older ones are deleted automatically.
-- **Patched TV** — the same pipeline as **Patching**, but fully independent:
+- **Patched TV apps** — the same pipeline as **Patched apps**, but fully independent:
   its own patch library, app targets, attachments, and processed-version
   history, published to its own repo at `/patched-tv/repo` and signed with its
   own keystore. It exists because mobile and TV builds of the same app usually
@@ -195,14 +196,14 @@ preferred over the bundle.
 ### Patch library
 
 `.mpp` patch files are managed in a **library**, separate from the apps that
-use them: upload a patch once in the Patching tab's "Patch Library" section,
+use them: upload a patch once on the Patched apps page's "Patch library" section,
 then attach it to any number of apps in "Patched Apps" (each attachment has
 its own supported-version list). Re-uploading a patch's content via "Update"
 replaces the file for every app using it, invalidates their cached results,
 and resets any per-app sub-patch/option overrides, so the next check
 re-patches with the new version's defaults.
 
-Each library patch also has a **"View Packages"** button that inspects the
+Each library patch also has a **"See what it patches"** menu entry that inspects the
 `.mpp` file directly (loading it through the engine's patch bundle loader,
 the same way the desktop app does) and shows, for every
 individual patch inside it, its name/description and which app package(s)
@@ -239,7 +240,7 @@ so this matches the desktop app exactly:
 Importing a new `.mpp` keeps each app's sub-patch/option overrides and its
 patched-version history (unlike a manual re-upload); the newer bundle version
 alone is what makes the next check re-patch the app's newest version - see
-below. **"Check source now"** on an entry runs the check immediately.
+below. **"Check for update"** on an entry runs the check immediately.
 
 ### When an app is (re-)patched
 
@@ -270,7 +271,7 @@ versions** on, any version is accepted when most of the patches accept any
 version experimentally. A `*` or glob pattern (`20.40.*`) doesn't match the
 app's own alpha/beta builds; pin a beta exactly to patch it.
 
-The GitHub token from the Settings tab (the same one the GitHub tab uses)
+The GitHub token from the Settings page (the same one the GitHub apps page uses)
 raises the rate limit for GitHub-hosted sources. It is attached to GitHub
 hosts only, never to GitLab.
 
@@ -301,12 +302,12 @@ Note that the engine also filters patches by **app version**: a sub-patch
 that declares support for specific versions of the target app is skipped for
 other versions, exactly as it is in the desktop app. That check is bypassed
 when the version being patched was chosen deliberately — a pinned
-`supported_versions` entry, or the "Patch Specific Version" button — since
+`supported_versions` entry, or the "Patch a specific version" menu entry — since
 that is an explicit request for that version.
 
 ### Setting it up
 
-1. **Upload a patch** in the Patching tab's Patch Library: an id, display
+1. **Upload a patch** in the Patched apps page's Patch library: an id, display
    name, the `.mpp` file, and an optional version label. Or skip the file and
    set a **Patch source** URL instead (see above) to have it downloaded and
    kept up to date automatically.
@@ -323,16 +324,16 @@ that is an explicit request for that version.
    compatibility info into the config.
 
 4. The patch scheduler polls on the same interval as the GitHub checker
-   (override with `patch_check_interval` on the Settings tab) — each cycle it
+   (override with `patch_check_interval` on the Settings page) — each cycle it
    checks every patch target's APKMirror page. When it finds a version
    matching an attached patch that hasn't been processed yet, it downloads,
    merges (if it's a bundle), patches, signs, and updates the
-   `/patched/repo` index. The **Patched TV** tab runs the exact same steps on
+   `/patched/repo` index. The **Patched TV apps** page runs the exact same steps on
    its own schedule against its own independent patch library/targets,
    updating `/patched-tv/repo` instead.
 
 5. To patch one specific version right away instead of waiting on the
-   scheduler, use a patch target's **"Patch Specific Version"** button and
+   scheduler, use a patch target's **"Patch a specific version"** menu entry (under the "⋯" button) and
    fill in the version number and the APKMirror **version page** URL (not the
    app's general listing page). The version number is typed in rather than
    scraped off the page, since APKMirror version strings don't follow one
@@ -472,11 +473,11 @@ Patched Apps list afterwards.
 
 ## Configuration Options
 
-Everything below is configured from the admin UI at `/admin` (Settings tab
-for global options, GitHub tab for per-repo options) - there is no
+Everything below is configured from the admin UI at `/admin` (Settings page
+for global options, GitHub apps page for per-repo options) - there is no
 `config.yml` file anymore.
 
-### Global settings (Settings tab)
+### Global settings (Settings page)
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -488,11 +489,11 @@ for global options, GitHub tab for per-repo options) - there is no
 | `github_token` | GitHub personal access token (optional) | "" |
 | `apk_pattern` | Default regex used to match APK filenames | `.*\.apk$` |
 | `max_versions_per_app` | Max APK versions to keep per app (0 = keep all) | 0 |
-| `log_level` | Log verbosity | INFO |
+| `log_level` | Saved but not applied yet; logging follows the `LOG_LEVEL` environment variable | INFO |
 
-### Defaults for new GitHub repos (Settings tab)
+### Defaults for new GitHub repos (Settings page)
 
-Applied to a repo unless it overrides the value itself (GitHub tab).
+Applied to a repo unless it overrides the value itself (GitHub apps page).
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -508,7 +509,7 @@ Without a token, you're limited to 60 API requests per hour. To increase this:
 1. Go to https://github.com/settings/tokens
 2. Generate a new token (classic)
 3. Select scope: `public_repo` (for public repos only)
-4. Paste it into the **GitHub token** field on the Settings tab and save.
+4. Paste it into the **GitHub token** field on the Settings page and save.
 
 This increases your rate limit to 5,000 requests/hour.
 
@@ -527,7 +528,7 @@ This increases your rate limit to 5,000 requests/hour.
 ### Configuration Tips
 
 1. **Start conservative**: Begin with a low `max_releases` and `include_prereleases` off
-2. **Per-app tuning**: Override the GitHub tab's defaults only for repos that need it
+2. **Per-app tuning**: Override the GitHub apps page's defaults only for repos that need it
 3. **Monitor disk usage**: Use `max_versions_per_app` if disk space is limited
 4. **API rate limits**: More releases = more API calls. Watch your GitHub rate limit
 5. **Disable unused repos**: Toggle `enabled` off instead of removing the repo

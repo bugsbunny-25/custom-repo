@@ -70,6 +70,8 @@ fun Route.repoRoutes(appConfig: AppConfig, githubScheduler: GithubScheduler) {
         val repo = id?.let { repoId -> appConfig.listRepos().firstOrNull { it.id == repoId } }
         if (repo == null) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Repo not found"))
+        } else if (!repo.enabled) {
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("${repo.repo} is paused - switch it back on to check it"))
         } else if (githubScheduler.startCheckNow(repo.repo)) {
             call.respond(HttpStatusCode.Accepted, CheckStartedResponse())
         } else {

@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Repo Config</title>
+  <script>
+    // Applied before the stylesheet paints so a saved dark/light choice never flashes.
+    try { const t = localStorage.getItem('admin-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/admin/assets/admin.css" />
+  <script src="/admin/assets/admin.js" defer></script>
+</head>
+<body>
+  <!--
+    Layout map (styles in admin.css, behaviour in admin.js):
+      #setupScreen          first-run form, shown until /api/setup/status says initialized
+      #app                  sidebar + one <section class="page"> per nav entry
+      <template>s           markup cloned by admin.js (patch pages, list rows' empty states)
+      <dialog>s             every pop-up form, opened with openDialog('id')
+  -->
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-box" viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
+      <symbol id="i-github" viewBox="0 0 24 24"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65S8.93 17.38 9 18v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></symbol>
+      <symbol id="i-tv" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="15" rx="2"/><path d="m17 2-5 5-5-5"/></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></symbol>
+      <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 3.5v17l14-8.5z"/></symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+      <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m2 12 8.58 3.91a2 2 0 0 0 1.66 0L21 12M2 17l8.58 3.91a2 2 0 0 0 1.66 0L21 17"/></symbol>
+      <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+    </defs>
+  </svg>
+
+  <!-- ============================== First-run setup ============================== -->
+  <div id="setupScreen" class="setup" hidden>
+    <div class="setup-card card">
+      <div class="brand brand-lg">
+        <span class="brand-mark"><svg class="icon"><use href="#i-box"/></svg></span>
+        <div>
+          <div class="brand-name">Set up your F-Droid repo</div>
+          <div class="brand-sub">This only happens once.</div>
+        </div>
+      </div>
+      <p class="muted">These details identify your repo in F-Droid clients. Double-check the URL: it can't be changed later without breaking everyone who already added the repo.</p>
+      <form id="setupForm" class="stack">
+        <div class="field">
+          <label for="setupRepoName">Repo name</label>
+          <input id="setupRepoName" type="text" required placeholder="My Apps" />
+        </div>
+        <div class="field">
+          <label for="setupRepoDescription">Description</label>
+          <input id="setupRepoDescription" type="text" required placeholder="Apps I build and patch myself" />
+        </div>
+        <div class="field">
+          <label for="setupRepoUrl">Base URL</label>
+          <input id="setupRepoUrl" type="url" required placeholder="https://fdroid.example.com" />
+          <p class="help">Just the domain. <code>/repo</code>, <code>/patched/repo</code> and <code>/patched-tv/repo</code> are added for you.</p>
+        </div>
+        <div class="field">
+          <label for="setupRepoIcon">Icon filename <span class="optional">optional</span></label>
+          <input id="setupRepoIcon" type="text" placeholder="icon.png" />
+        </div>
+        <p class="form-error" data-form-error></p>
+        <button type="submit" class="btn btn-primary btn-block">Create repo</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============================== Main app ============================== -->
+  <div id="app" class="app" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#github">
+        <span class="brand-mark"><svg class="icon"><use href="#i-box"/></svg></span>
+        <div class="brand-text">
+          <div class="brand-name" id="brandName">F-Droid repo</div>
+          <div class="brand-sub">Admin</div>
+        </div>
+      </a>
+
+      <nav class="nav" aria-label="Sections">
+        <a class="nav-item" href="#github" data-page="github">
+          <svg class="icon"><use href="#i-github"/></svg><span>GitHub apps</span><span class="nav-count" data-count="github"></span>
+        </a>
+        <a class="nav-item" href="#patched" data-page="patched">
+          <svg class="icon"><use href="#i-phone"/></svg><span>Patched apps</span><span class="nav-count" data-count="patched"></span>
+        </a>
+        <a class="nav-item" href="#patched-tv" data-page="patched-tv">
+          <svg class="icon"><use href="#i-tv"/></svg><span>Patched TV apps</span><span class="nav-count" data-count="patched-tv"></span>
+        </a>
+        <a class="nav-item" href="#settings" data-page="settings">
+          <svg class="icon"><use href="#i-sliders"/></svg><span>Settings</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <button type="button" class="btn btn-ghost btn-sm theme-toggle" data-action="toggle-theme" title="Switch light / dark">
+          <svg class="icon icon-sun"><use href="#i-sun"/></svg><svg class="icon icon-moon"><use href="#i-moon"/></svg>
+          <span>Theme</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- ---------- GitHub apps ---------- -->
+      <section class="page" id="page-github" data-page="github" hidden>
+        <header class="page-head">
+          <div>
+            <h1>GitHub apps</h1>
+            <p class="page-desc">APKs attached to GitHub releases are downloaded into your main repo automatically.</p>
+          </div>
+          <div class="page-actions">
+            <button type="button" class="btn" data-action="check-all-repos" data-check-btn>
+              <svg class="icon"><use href="#i-refresh"/></svg>Check all now
+            </button>
+            <button type="button" class="btn btn-primary" data-action="new-repo">
+              <svg class="icon"><use href="#i-plus"/></svg>Add repo
+            </button>
+          </div>
+        </header>
+        <div class="banner" id="repoCheckStatus" hidden></div>
+        <div class="card">
+          <ul class="list" id="repoList"></ul>
+        </div>
+      </section>
+
+      <!-- ---------- Patched apps (mobile + TV share one template) ---------- -->
+      <section class="page" id="page-patched" data-page="patched" data-channel="mobile" hidden></section>
+      <section class="page" id="page-patched-tv" data-page="patched-tv" data-channel="tv" hidden></section>
+
+      <!-- ---------- Settings ---------- -->
+      <section class="page" id="page-settings" data-page="settings" hidden>
+        <header class="page-head">
+          <div>
+            <h1>Settings</h1>
+            <p class="page-desc">Everything the server uses, in one place.</p>
+          </div>
+        </header>
+
+        <form id="settingsForm" class="settings">
+          <div class="card settings-group">
+            <div class="settings-intro">
+              <h2>Repo identity</h2>
+              <p>How your repo appears in F-Droid clients.</p>
+            </div>
+            <div class="settings-fields">
+              <div class="field">
+                <label for="settingsRepoName">Repo name</label>
+                <input id="settingsRepoName" type="text" />
+              </div>
+              <div class="field">
+                <label for="settingsRepoDescription">Description</label>
+                <input id="settingsRepoDescription" type="text" />
+              </div>
+              <div class="field">
+                <label for="settingsRepoIcon">Icon filename</label>
+                <input id="settingsRepoIcon" type="text" placeholder="icon.png" />
+              </div>
+              <div class="field">
+                <label><svg class="icon icon-inline"><use href="#i-lock"/></svg> Repo addresses</label>
+                <div class="url-list" id="settingsRepoUrls"></div>
+                <p class="help">Set during first-run setup and locked, because changing them would break existing subscriptions.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-group">
+            <div class="settings-intro">
+              <h2>Schedule</h2>
+              <p>How often the server looks for new releases. Changes apply after the container restarts.</p>
+            </div>
+            <div class="settings-fields">
+              <div class="field-row">
+                <div class="field">
+                  <label for="settingsUpdateInterval">Check GitHub every</label>
+                  <div class="input-suffix"><input id="settingsUpdateInterval" type="number" min="60" data-duration /><span>seconds</span></div>
+                  <p class="help" data-duration-for="settingsUpdateInterval"></p>
+                </div>
+                <div class="field">
+                  <label for="settingsPatchCheckInterval">Check apps to patch every <span class="optional">optional</span></label>
+                  <div class="input-suffix"><input id="settingsPatchCheckInterval" type="number" min="60" placeholder="Same as GitHub" data-duration /><span>seconds</span></div>
+                  <p class="help" data-duration-for="settingsPatchCheckInterval"></p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-group">
+            <div class="settings-intro">
+              <h2>GitHub downloads</h2>
+              <p>Applies to every repo on the GitHub apps page.</p>
+            </div>
+            <div class="settings-fields">
+              <div class="field">
+                <label for="settingsGithubToken">Access token <span class="optional">optional</span></label>
+                <div class="input-group">
+                  <input id="settingsGithubToken" type="password" autocomplete="off" spellcheck="false" placeholder="ghp_..." />
+                  <button type="button" class="btn" data-action="toggle-secret" data-target="settingsGithubToken">Show</button>
+                </div>
+                <p class="help">Raises GitHub's limit from 60 to 5,000 requests an hour. Also used for GitHub patch sources. Applies after a restart.</p>
+              </div>
+              <div class="field-row">
+                <div class="field">
+                  <label for="settingsApkPattern">APK file pattern</label>
+                  <input id="settingsApkPattern" type="text" class="mono" spellcheck="false" />
+                  <p class="help">Regex matched against release file names. Each repo can override it.</p>
+                </div>
+                <div class="field">
+                  <label for="settingsMaxVersionsPerApp">Versions to keep per app</label>
+                  <input id="settingsMaxVersionsPerApp" type="number" min="0" />
+                  <p class="help">Older APKs are removed. 0 keeps everything.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-group">
+            <div class="settings-intro">
+              <h2>New repo defaults</h2>
+              <p>Pre-filled when you add a GitHub repo.</p>
+            </div>
+            <div class="settings-fields">
+              <label class="switch"><input id="settingsDefaultIncludePrereleases" type="checkbox" /><span class="switch-track"></span><span>Include pre-releases</span></label>
+              <label class="switch"><input id="settingsDefaultIncludeDrafts" type="checkbox" /><span class="switch-track"></span><span>Include drafts</span></label>
+              <label class="switch"><input id="settingsDefaultEnabled" type="checkbox" /><span class="switch-track"></span><span>Active (checked on schedule)</span></label>
+              <div class="field field-narrow">
+                <label for="settingsDefaultMaxReleases">Releases to check</label>
+                <input id="settingsDefaultMaxReleases" type="number" min="0" />
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-group">
+            <div class="settings-intro">
+              <h2>APKMirror</h2>
+              <p>Used when downloading apps to patch.</p>
+            </div>
+            <div class="settings-fields">
+              <div class="field">
+                <label for="settingsFlareSolverrUrl">FlareSolverr URL <span class="optional">optional</span></label>
+                <input id="settingsFlareSolverrUrl" type="text" placeholder="http://flaresolverr:8191/v1" spellcheck="false" />
+                <p class="help">Helps get past Cloudflare checks. Leave empty to turn it off.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-group">
+            <div class="settings-intro">
+              <h2>Advanced</h2>
+            </div>
+            <div class="settings-fields">
+              <div class="field field-narrow">
+                <label for="settingsLogLevel">Log level</label>
+                <select id="settingsLogLevel">
+                  <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option>
+                </select>
+                <p class="help">Saved, but not applied yet: logging follows the <code>LOG_LEVEL</code> environment variable.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="savebar">
+            <span class="savebar-text" id="settingsDirty">All changes saved</span>
+            <button type="button" class="btn" data-action="reset-settings">Discard</button>
+            <button type="submit" class="btn btn-primary">Save changes</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <!-- ============================== Templates ============================== -->
+  <template id="tpl-patch-page">
+    <header class="page-head">
+      <div>
+        <h1 data-text="title"></h1>
+        <p class="page-desc" data-text="description"></p>
+      </div>
+      <div class="page-actions">
+        <button type="button" class="btn" data-action="patch-all">
+          <svg class="icon"><use href="#i-play"/></svg>Patch all now
+        </button>
+        <button type="button" class="btn btn-primary" data-action="new-target">
+          <svg class="icon"><use href="#i-plus"/></svg>Add app
+        </button>
+      </div>
+    </header>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Apps</h2>
+        <p>Each app is watched on APKMirror. New versions get the attached patches applied and are published to <code data-text="repoPath"></code>. The newest 3 builds per app and patch are kept.</p>
+      </div>
+      <ul class="list" data-list="targets"></ul>
+    </div>
+
+    <div class="card">
+      <div class="card-head card-head-actions">
+        <div>
+          <h2>Patch library</h2>
+          <p>Morphe <code>.mpp</code> bundles you can attach to any app above. Link one to a GitHub or GitLab repo and new releases are imported automatically.</p>
+        </div>
+        <button type="button" class="btn" data-action="new-library-patch">
+          <svg class="icon"><use href="#i-upload"/></svg>Add patch bundle
+        </button>
+      </div>
+      <ul class="list" data-list="library"></ul>
+    </div>
+  </template>
+
+  <!-- ============================== Dialogs ============================== -->
+  <dialog id="repoDialog" class="dialog">
+    <form id="repoForm" method="dialog">
+      <header class="dialog-head">
+        <h2 data-text="title">Add repo</h2>
+        <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="dialog-body stack">
+        <input type="hidden" id="repoId" />
+        <div class="field">
+          <label for="repo">GitHub repository</label>
+          <input id="repo" type="text" required placeholder="owner/name" spellcheck="false" />
+          <p class="help">For example <code>termux/termux-app</code>.</p>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="max_releases">Releases to check</label>
+            <input id="max_releases" type="number" min="0" required />
+            <p class="help">How many of the newest releases to look at.</p>
+          </div>
+          <div class="field">
+            <label for="apk_pattern">APK file pattern</label>
+            <input id="apk_pattern" type="text" required class="mono" spellcheck="false" />
+            <p class="help">Regex for which release files to download.</p>
+          </div>
+        </div>
+        <div class="switch-list">
+          <label class="switch"><input id="include_prereleases" type="checkbox" /><span class="switch-track"></span><span>Include pre-releases</span></label>
+          <label class="switch"><input id="include_drafts" type="checkbox" /><span class="switch-track"></span><span>Include drafts</span></label>
+          <label class="switch"><input id="enabled" type="checkbox" /><span class="switch-track"></span><span>Active <span class="muted">(paused repos are kept but not checked)</span></span></label>
+        </div>
+        <p class="form-error" data-form-error></p>
+      </div>
+      <footer class="dialog-foot">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="targetDialog" class="dialog">
+    <form id="targetForm" method="dialog">
+      <header class="dialog-head">
+        <h2 data-text="title">Add app</h2>
+        <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="dialog-body stack">
+        <input type="hidden" id="targetOriginalId" />
+        <div class="field-row">
+          <div class="field">
+            <label for="targetName">Name</label>
+            <input id="targetName" type="text" required placeholder="YouTube" />
+          </div>
+          <div class="field">
+            <label for="targetId">ID</label>
+            <input id="targetId" type="text" required pattern="[a-zA-Z0-9_-]+" placeholder="youtube" spellcheck="false" />
+            <p class="help">Letters, numbers, - and _. Can't be changed later.</p>
+          </div>
+        </div>
+        <div class="field">
+          <label for="targetApkmirrorUrl">APKMirror page</label>
+          <input id="targetApkmirrorUrl" type="url" required placeholder="https://www.apkmirror.com/apk/google-inc/youtube/" />
+        </div>
+        <div class="field">
+          <label for="targetApkpureUrl">APKPure page <span class="optional">optional</span></label>
+          <input id="targetApkpureUrl" type="url" placeholder="https://apkpure.com/app-name/com.example.app" />
+          <p class="help">Fallback for versions APKMirror doesn't have.</p>
+        </div>
+        <div class="field">
+          <label for="targetPackageName">Package name <span class="optional">optional</span></label>
+          <input id="targetPackageName" type="text" placeholder="com.example.app" spellcheck="false" />
+          <p class="help">Checked against each downloaded APK, and used to show only the relevant patches when configuring.</p>
+        </div>
+        <label class="switch"><input id="targetEnabled" type="checkbox" /><span class="switch-track"></span><span>Active <span class="muted">(checked on schedule)</span></span></label>
+        <p class="form-error" data-form-error></p>
+      </div>
+      <footer class="dialog-foot">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="libraryDialog" class="dialog">
+    <form id="libraryForm" method="dialog">
+      <header class="dialog-head">
+        <h2 data-text="title">Add patch bundle</h2>
+        <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="dialog-body stack">
+        <input type="hidden" id="libraryOriginalId" />
+        <div class="field-row">
+          <div class="field">
+            <label for="libraryName">Name</label>
+            <input id="libraryName" type="text" required placeholder="Morphe patches" />
+          </div>
+          <div class="field">
+            <label for="libraryId">ID</label>
+            <input id="libraryId" type="text" required pattern="[a-zA-Z0-9_-]+" placeholder="morphe" spellcheck="false" />
+            <p class="help">Can't be changed later.</p>
+          </div>
+        </div>
+
+        <fieldset class="choice">
+          <legend>Where the .mpp file comes from</legend>
+          <div class="field">
+            <label for="librarySourceUrl">Auto-update from a repo</label>
+            <input id="librarySourceUrl" type="url" placeholder="https://github.com/owner/repo" spellcheck="false" />
+            <p class="help">GitHub or GitLab. The <code>.mpp</code> from each new release is imported automatically.</p>
+            <label class="switch switch-sm"><input id="libraryIncludePrereleases" type="checkbox" /><span class="switch-track"></span><span>Include pre-releases</span></label>
+          </div>
+          <div class="choice-or"><span>or</span></div>
+          <div class="field">
+            <label for="libraryFile">Upload a file</label>
+            <input id="libraryFile" type="file" accept=".mpp" />
+            <p class="help" id="libraryFileHint"></p>
+          </div>
+        </fieldset>
+
+        <div class="field">
+          <label for="libraryVersion">Version label <span class="optional">optional</span></label>
+          <input id="libraryVersion" type="text" placeholder="1.33.0" />
+        </div>
+        <p class="form-success" data-form-success></p>
+        <p class="form-error" data-form-error></p>
+      </div>
+      <footer class="dialog-foot">
+        <button type="button" class="btn me-auto" id="libraryCheckSourceBtn" hidden>
+          <svg class="icon"><use href="#i-refresh"/></svg>Check for update
+        </button>
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="attachDialog" class="dialog dialog-wide">
+    <div class="dialog-shell">
+      <header class="dialog-head">
+        <div>
+          <h2 data-text="title">Patches</h2>
+          <p class="dialog-sub">Bundles applied to every new version of this app.</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="dialog-body stack">
+        <ul class="list list-boxed" id="attachList"></ul>
+        <p class="muted" id="attachNote"></p>
+
+        <form id="attachForm" class="subcard stack">
+          <h3>Attach a bundle</h3>
+          <input type="hidden" id="attachTargetId" />
+          <div class="field">
+            <label for="attachPatchId">Bundle</label>
+            <select id="attachPatchId" required></select>
+          </div>
+          <div class="field">
+            <label for="attachSupportedVersions">App versions to patch <span class="optional">optional</span></label>
+            <input id="attachSupportedVersions" type="text" placeholder="Use the versions the bundle supports" spellcheck="false" />
+            <p class="help">Comma-separated, e.g. <code>19.16.39, 19.17.0</code>, or <code>*</code> for any. Leave empty to follow the bundle.</p>
+          </div>
+          <div class="field">
+            <label for="attachPatchArgs">Extra Morphe arguments <span class="optional">optional</span></label>
+            <input id="attachPatchArgs" type="text" class="mono" spellcheck="false" />
+          </div>
+          <label class="switch"><input id="attachIncludeExperimental" type="checkbox" /><span class="switch-track"></span><span>Also patch versions the bundle marks experimental <span class="muted">(only when versions above is empty)</span></span></label>
+          <p class="form-error" data-form-error></p>
+          <div><button type="submit" class="btn btn-primary"><svg class="icon"><use href="#i-plus"/></svg>Attach</button></div>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="versionDialog" class="dialog">
+    <form id="versionForm" method="dialog">
+      <header class="dialog-head">
+        <h2 data-text="title">Patch a specific version</h2>
+        <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="dialog-body stack">
+        <p class="muted">Patches one exact version with every attached bundle, even if it isn't the newest or isn't in the supported list.</p>
+        <input type="hidden" id="versionTargetId" />
+        <div class="field">
+          <label for="versionNumber">Version</label>
+          <input id="versionNumber" type="text" required placeholder="19.16.39" />
+        </div>
+        <div class="field">
+          <label for="versionPageUrl">Download page</label>
+          <input id="versionPageUrl" type="url" required placeholder="https://www.apkmirror.com/apk/.../app-19-16-39-release/" />
+          <p class="help">An APKMirror version page, or an APKPure download link.</p>
+        </div>
+        <p class="form-error" data-form-error></p>
+      </div>
+      <footer class="dialog-foot">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary"><svg class="icon"><use href="#i-play"/></svg>Patch</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="inspectDialog" class="dialog dialog-wide">
+    <div class="dialog-shell">
+      <header class="dialog-head">
+        <div>
+          <h2 data-text="title">Bundle contents</h2>
+          <p class="dialog-sub">Which apps and versions each patch supports.</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="dialog-body stack">
+        <div class="search"><svg class="icon"><use href="#i-search"/></svg><input type="search" placeholder="Filter by app or patch" data-filter="#inspectBody" /></div>
+        <div id="inspectBody" class="stack-sm"></div>
+        <p class="form-error" data-form-error></p>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="configureDialog" class="dialog dialog-wide">
+    <div class="dialog-shell">
+      <header class="dialog-head">
+        <div>
+          <h2 data-text="title">Configure patches</h2>
+          <p class="dialog-sub">Turn individual patches on or off and change their options. Anything left at its default follows the bundle; changes are reset when you upload a new file by hand.</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="dialog-body stack">
+        <div class="search"><svg class="icon"><use href="#i-search"/></svg><input type="search" placeholder="Filter patches" data-filter="#configureBody" /></div>
+        <div id="configureBody" class="stack-sm"></div>
+        <p class="form-error" data-form-error></p>
+      </div>
+      <footer class="dialog-foot">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="button" class="btn btn-primary" id="configureSaveBtn">Save</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog id="confirmDialog" class="dialog dialog-sm">
+    <form method="dialog">
+      <div class="dialog-body stack">
+        <h2 data-text="title">Are you sure?</h2>
+        <p class="muted" data-text="body"></p>
+      </div>
+      <footer class="dialog-foot">
+        <button type="submit" class="btn" value="cancel">Cancel</button>
+        <button type="submit" class="btn btn-danger" value="ok" data-text="confirm">Delete</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>
