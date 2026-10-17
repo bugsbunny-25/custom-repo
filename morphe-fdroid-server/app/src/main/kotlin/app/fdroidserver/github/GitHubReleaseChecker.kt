@@ -8,14 +8,20 @@ import io.ktor.client.statement.HttpStatement
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentLength
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.jvm.javaio.toInputStream
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.zip.ZipFile
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.delay
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -44,7 +50,12 @@ class GitHubReleaseChecker(
     )
 
     @Serializable
-    data class GitHubAsset(val id: Long, val name: String)
+    data class GitHubAsset(
+        val id: Long,
+        val name: String,
+        /** Byte size GitHub reports for the asset; 0 when unknown. */
+        val size: Long = 0,
+    )
 
     @Serializable
     data class GitHubRelease(
@@ -105,31 +116,83 @@ class GitHubReleaseChecker(
         return release.assets.filter { pattern.containsMatchIn(it.name) }
     }
 
-    suspend fun downloadAsset(repo: String, asset: GitHubAsset, destination: File): Boolean {
+    /**
+     * Downloads [asset] to [destination], retrying up to [maxAttempts] times.
+     * The bytes go to a hidden `.part` file next to [destination] and are
+     * only moved into place once [isComplete] passes, so an interrupted or
+     * cut-off transfer never leaves a truncated APK where `fdroid update`
+     * (and the next check) would pick it up.
+     */
+    suspend fun downloadAsset(
+        repo: String,
+        asset: GitHubAsset,
+        destination: File,
+        maxAttempts: Int = 3,
+        retryDelayMillis: Long = 5_000,
+    ): Boolean {
+        for (attempt in 1..maxAttempts) {
+            if (downloadOnce(repo, asset, destination, attempt, maxAttempts)) return true
+            if (attempt < maxAttempts) delay(retryDelayMillis * attempt)
+        }
+        logger.error("Giving up on ${asset.name} after $maxAttempts attempt(s)")
+        return false
+    }
+
+    private suspend fun downloadOnce(repo: String, asset: GitHubAsset, destination: File, attempt: Int, maxAttempts: Int): Boolean {
+        destination.parentFile?.mkdirs()
+        val partFile = File(destination.parentFile, ".${destination.name}.part")
         return try {
-            logger.info("Downloading ${asset.name}...")
+            logger.info("Downloading ${asset.name} (attempt $attempt/$maxAttempts)...")
             val url = "https://api.github.com/repos/$repo/releases/assets/${asset.id}"
             val statement: HttpStatement = httpClient.prepareGet(url) {
                 header("Accept", "application/octet-stream")
                 authHeaders()["Authorization"]?.let { header("Authorization", it) }
             }
-            statement.execute { response ->
+            val ok = statement.execute { response ->
                 if (!response.status.isSuccess()) {
                     logger.warn("Failed to download ${asset.name}: HTTP ${response.status}")
                     return@execute false
                 }
-                destination.parentFile?.mkdirs()
                 response.bodyAsChannel().toInputStream().use { input ->
-                    destination.outputStream().use { out -> input.copyTo(out) }
+                    partFile.outputStream().use { out -> input.copyTo(out) }
+                }
+                val contentLength = response.contentLength()
+                if (contentLength != null && partFile.length() != contentLength) {
+                    logger.warn("Download of ${asset.name} was cut off: got ${partFile.length()} of $contentLength bytes")
+                    return@execute false
                 }
                 true
             }
+            if (!ok) return false
+            if (!isComplete(partFile, asset)) {
+                logger.warn(
+                    "Downloaded ${asset.name} is incomplete or not a valid APK " +
+                        "(${partFile.length()} bytes, expected ${asset.size})"
+                )
+                return false
+            }
+            Files.move(partFile.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             logger.error("Error downloading ${asset.name}: $e")
-            destination.delete()
             false
+        } finally {
+            partFile.delete()
         }
     }
+
+    /** True if [file] holds the whole of [asset]: its size matches what
+     * GitHub reports (when known) and it opens as a zip, which is what
+     * `fdroid update` needs to read it as an APK. */
+    fun isComplete(file: File, asset: GitHubAsset): Boolean {
+        if (!file.isFile) return false
+        if (asset.size > 0 && file.length() != asset.size) return false
+        return isValidZip(file)
+    }
+
+    fun isValidZip(file: File): Boolean = runCatching { ZipFile(file).use { true } }.getOrDefault(false)
 
     fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")

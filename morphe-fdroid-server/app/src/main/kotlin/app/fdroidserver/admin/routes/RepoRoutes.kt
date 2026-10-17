@@ -1,6 +1,7 @@
 package app.fdroidserver.admin.routes
 
 import app.fdroidserver.config.AppConfig
+import app.fdroidserver.github.GithubScheduler
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.request.receive
@@ -16,11 +17,14 @@ import kotlinx.serialization.Serializable
 data class ReposResponse(val repos: List<AppConfig.GithubRepoView>)
 
 @Serializable
+data class CheckStartedResponse(val started: Boolean = true)
+
+@Serializable
 data class RepoOkResponse(val ok: Boolean = true, val repo: AppConfig.RepoPayload)
 
 /** The "GitHub" tab's API - unchanged endpoints/shapes from the Python
  * version's `/api/repos*` routes, just backed by SQLite via [AppConfig]. */
-fun Route.repoRoutes(appConfig: AppConfig) {
+fun Route.repoRoutes(appConfig: AppConfig, githubScheduler: GithubScheduler) {
     get("/api/repos") {
         call.respond(ReposResponse(appConfig.listRepos()))
     }
@@ -48,6 +52,33 @@ fun Route.repoRoutes(appConfig: AppConfig) {
         } else {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Repo not found"))
         }
+    }
+
+    // "Check now" buttons. The check runs in the background (downloads can
+    // take longer than the nginx proxy timeout) and the UI polls
+    // /api/repos/check-status until it finishes.
+    post("/api/repos/check") {
+        if (githubScheduler.startCheckNow()) {
+            call.respond(HttpStatusCode.Accepted, CheckStartedResponse())
+        } else {
+            call.respond(HttpStatusCode.Conflict, ErrorResponse("A GitHub check is already running"))
+        }
+    }
+
+    post("/api/repos/{id}/check") {
+        val id = call.parameters["id"]?.toIntOrNull()
+        val repo = id?.let { repoId -> appConfig.listRepos().firstOrNull { it.id == repoId } }
+        if (repo == null) {
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("Repo not found"))
+        } else if (githubScheduler.startCheckNow(repo.repo)) {
+            call.respond(HttpStatusCode.Accepted, CheckStartedResponse())
+        } else {
+            call.respond(HttpStatusCode.Conflict, ErrorResponse("A GitHub check is already running"))
+        }
+    }
+
+    get("/api/repos/check-status") {
+        call.respond(githubScheduler.checkStatus)
     }
 
     delete("/api/repos/{id}/checked/{releaseId}") {
