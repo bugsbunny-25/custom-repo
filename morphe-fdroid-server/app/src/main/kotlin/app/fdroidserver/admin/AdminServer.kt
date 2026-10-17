@@ -8,6 +8,7 @@ import app.fdroidserver.admin.routes.setupRoutes
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.config.AppConfig.PatchSchemas
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
+import app.fdroidserver.github.GithubScheduler
 import app.fdroidserver.patching.PatchLibrary
 import app.fdroidserver.patching.PatchSourceScheduler
 import app.fdroidserver.patching.PatchScheduler
@@ -61,6 +62,7 @@ class AdminServer(
     private val patchedTvRepoDir: File,
     private val patchSchedulerTv: PatchScheduler,
     private val patchSourceSchedulerTv: PatchSourceScheduler,
+    private val githubScheduler: GithubScheduler,
     private val host: String = "0.0.0.0",
     private val port: Int = 5001,
 ) {
@@ -116,7 +118,7 @@ class AdminServer(
             get("/admin/") { call.respondText(adminHtml, ContentType.Text.Html) }
             setupRoutes(appConfig, fdroidRepoManager, repoDir, patchedRepoDir, patchedTvRepoDir)
             settingsRoutes(appConfig, fdroidRepoManager, repoDir, patchedRepoDir, patchedTvRepoDir)
-            repoRoutes(appConfig)
+            repoRoutes(appConfig, githubScheduler)
             patchLibraryRoutes(appConfig, patchLibrary, patchesDir, PatchSchemas.Mobile, patchSourceScheduler, basePath = "/api/patch-library")
             patchLibraryRoutes(appConfig, patchLibrary, patchesTvDir, PatchSchemas.Tv, patchSourceSchedulerTv, basePath = "/api/patch-library-tv")
             patchTargetRoutes(appConfig, patchScheduler, PatchSchemas.Mobile, basePath = "/api/patch-targets")

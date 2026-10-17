@@ -52,6 +52,9 @@
     .btn:hover { background: var(--brand-hover); }
     .btn.small { padding: 5px 8px; font-size: 12px; }
     .btn.ghost { background: #fff; color: #334155; border-color: #cbd5e1; }
+    .gh-link { margin-left: 6px; font-size: 12px; color: #2563eb; text-decoration: none; white-space: nowrap; }
+    .gh-link:hover { text-decoration: underline; }
+    .check-status { margin-left: 10px; font-size: 13px; color: #475569; }
     .pill {
       display: inline-block;
       padding: 4px 8px;
@@ -200,9 +203,11 @@
 
     <div id="githubPanel" class="tab-panel active">
       <h1>Checked Repositories</h1>
-      <p class="sub">Edit per-repo settings, view checked updates, and delete entries to mark them as not checked.</p>
+      <p class="sub">Edit per-repo settings, view checked updates, and delete entries to mark them as not checked. "Check now" looks for new releases straight away instead of waiting for the next scheduled check, and refreshes the F-Droid index if anything new was downloaded.</p>
       <div style="margin: 0 0 12px;">
         <button id="newRepoBtn" class="btn">New Repo</button>
+        <button id="checkAllReposBtn" class="btn ghost">Check all now</button>
+        <span id="repoCheckStatus" class="check-status"></span>
       </div>
       <div class="card">
         <table>
@@ -607,6 +612,64 @@
       return listed.join(', ');
     }
 
+    function githubUrl(repo) {
+      return 'https://github.com/' + repo.split('/').map(encodeURIComponent).join('/');
+    }
+
+    const checkAllReposBtn = document.getElementById('checkAllReposBtn');
+    const repoCheckStatus = document.getElementById('repoCheckStatus');
+    let repoCheckPolling = false;
+
+    function setRepoCheckButtonsDisabled(disabled) {
+      checkAllReposBtn.disabled = disabled;
+      document.querySelectorAll('[data-check-repo]').forEach((btn) => { btn.disabled = disabled; });
+    }
+
+    async function startRepoCheck(url, label) {
+      const res = await fetch(url, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        repoCheckStatus.textContent = data.error || 'Could not start the check';
+        return;
+      }
+      repoCheckStatus.textContent = `Checking ${label}...`;
+      pollRepoCheck();
+    }
+
+    // Polls until the background check finishes, then reloads the table
+    // so newly checked releases show up.
+    async function pollRepoCheck() {
+      if (repoCheckPolling) return;
+      repoCheckPolling = true;
+      setRepoCheckButtonsDisabled(true);
+      try {
+        while (true) {
+          const status = await (await fetch('/api/repos/check-status')).json();
+          if (!status.running) {
+            const label = status.repo || 'all repos';
+            if (status.error) {
+              repoCheckStatus.textContent = `Check of ${label} failed: ${status.error}`;
+            } else if (status.finished_at) {
+              repoCheckStatus.textContent = status.downloaded
+                ? `${label}: downloaded ${status.downloaded} new APK(s)${status.index_updated ? ', F-Droid index updated' : ', but the F-Droid index update failed (see logs)'}.`
+                : `${label}: no new releases.`;
+            }
+            await loadRepos();
+            break;
+          }
+          repoCheckStatus.textContent = `Checking ${status.repo || 'all repos'}...`;
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
+      } catch (e) {
+        repoCheckStatus.textContent = 'Lost track of the check - reload to see the result.';
+      } finally {
+        repoCheckPolling = false;
+        setRepoCheckButtonsDisabled(false);
+      }
+    }
+
+    checkAllReposBtn.addEventListener('click', () => startRepoCheck('/api/repos/check', 'all repos'));
+
     async function loadRepos() {
       const res = await fetch('/api/repos');
       const data = await res.json();
@@ -623,6 +686,7 @@
               <div class="entry">
                 <div class="entry-main">
                   <strong>${escapeHtml(entry.tag || entry.release_id)}</strong>
+                  ${entry.tag ? `<a class="gh-link" href="${githubUrl(repo.repo)}/releases/tag/${encodeURIComponent(entry.tag)}" target="_blank" rel="noopener">GitHub ↗</a>` : ''}
                   <span class="entry-meta"> (${escapeHtml(entry.type || 'stable')}) • Build ${escapeHtml(entry.build_number)} • APKs ${entry.apks_downloaded}/${entry.apks_found}</span>
                 </div>
                 <button class="btn ghost small" data-delete-id="${repo.id}" data-release-id="${encodeURIComponent(entry.build_number)}">Delete</button>
@@ -632,14 +696,23 @@
 
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td><strong>${escapeHtml(repo.repo)}</strong></td>
+          <td>
+            <strong><a href="${githubUrl(repo.repo)}" target="_blank" rel="noopener" style="color: inherit;">${escapeHtml(repo.repo)}</a></strong>
+            <a class="gh-link" href="${githubUrl(repo.repo)}/releases" target="_blank" rel="noopener">Releases ↗</a>
+          </td>
           <td><span class="pill">${repo.include_prereleases ? 'Yes' : 'No'}</span></td>
           <td><span class="pill">${repo.include_drafts ? 'Yes' : 'No'}</span></td>
           <td>${repo.max_releases}</td>
           <td>${entriesHtml}</td>
-          <td><button class="btn" data-id="${repo.id}">Edit</button></td>
+          <td>
+            <button class="btn" data-id="${repo.id}">Edit</button>
+            <button class="btn ghost small" data-check-repo="${repo.id}">Check now</button>
+          </td>
         `;
         tr.querySelector('button[data-id]').addEventListener('click', () => openEditor(repo));
+        const checkRepoBtn = tr.querySelector('[data-check-repo]');
+        checkRepoBtn.disabled = repoCheckPolling;
+        checkRepoBtn.addEventListener('click', () => startRepoCheck(`/api/repos/${repo.id}/check`, repo.repo));
         tr.querySelectorAll('[data-delete-id]').forEach((btn) => {
           btn.addEventListener('click', async () => {
             const repoId = btn.getAttribute('data-delete-id');
@@ -1629,6 +1702,9 @@
         loadLibrary(CHANNELS.tv), loadPatchTargets(CHANNELS.tv),
         loadSettings(),
       ]);
+      // Pick a "Check now" that's still running back up after a reload.
+      const checkStatus = await (await fetch('/api/repos/check-status')).json().catch(() => ({}));
+      if (checkStatus.running) pollRepoCheck();
     }
 
     boot();

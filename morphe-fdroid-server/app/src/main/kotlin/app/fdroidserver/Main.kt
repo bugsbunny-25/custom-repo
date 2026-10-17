@@ -99,14 +99,14 @@ fun main(args: Array<String>) {
     )
 
     // Created up front (rather than gated behind the "setup complete" wait
-    // below, like githubScheduler is) since AdminServer's routes - including
-    // the Patch Library's "Check source now" button - need a
-    // PatchSourceScheduler instance to register at startup. The
-    // scheduled background checks (in the loops below) still don't run
-    // until setup completes, same as every other scheduler. githubToken is
-    // snapshotted once here, same as the existing githubScheduler already
-    // did (a token changed later via Settings takes effect on the next
-    // restart, not immediately - not new behavior introduced here).
+    // below) since AdminServer's routes - the Patch Library's "Check source
+    // now" button and the GitHub tab's "Check now" buttons - need the
+    // PatchSourceScheduler and GithubScheduler instances to register at
+    // startup. The scheduled background checks (in the loops below) still
+    // don't run until setup completes. githubToken is snapshotted once here
+    // (a token changed later via Settings takes effect on the next restart,
+    // not immediately).
+    //
     // CIO's default 15s request timeout covers the whole response body and
     // silently cuts off large APK downloads, so give release downloads room
     // and rely on the socket timeout to catch a stalled connection instead.
@@ -119,6 +119,8 @@ fun main(args: Array<String>) {
     }
     val initialGithubToken = runBlocking { appConfig.getSettings() }.githubToken.ifBlank { null }
     val releaseChecker = GitHubReleaseChecker(githubHttpClient, initialGithubToken)
+    // Also handed to AdminServer for the GitHub tab's "Check now" buttons.
+    val githubScheduler = GithubScheduler(appConfig, releaseChecker, repoDir, fdroidRepoManager)
 
     // Separate client for the patch sources: the vendored engine's sources take
     // a plain HttpClient and set their own headers, and this one additionally
@@ -130,7 +132,7 @@ fun main(args: Array<String>) {
 
     val adminServer = AdminServer(
         appConfig, patchLibrary, patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler, patchSourceScheduler,
-        patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchSourceSchedulerTv,
+        patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchSourceSchedulerTv, githubScheduler,
     )
     adminServer.start()
     logger.info("Admin server started on :5001")
@@ -214,8 +216,6 @@ fun main(args: Array<String>) {
 
             val settings = appConfig.getSettings()
             try {
-                val githubScheduler = GithubScheduler(appConfig, releaseChecker, repoDir, fdroidRepoManager)
-
                 val githubInterval = settings.updateInterval.seconds
                 val patchInterval = (settings.patchCheckInterval ?: settings.updateInterval).seconds
 
