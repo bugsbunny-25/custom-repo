@@ -30,6 +30,7 @@ class GithubScheduler(
         for (repoConfig in repos) {
             if (checkRepo(repoConfig)) anyUpdated = true
         }
+        if (removeCorruptApks()) anyUpdated = true
 
         if (anyUpdated) {
             fdroidRepoManager.updateIndex(repoDir)
@@ -61,12 +62,16 @@ class GithubScheduler(
 
         for (release in releases) {
             val releaseIdStr = release.id.toString()
-            if (releaseIdStr in alreadyProcessed) continue
+            val matchingAssets = releaseChecker.matchingAssets(release, repoConfig)
+
+            if (releaseIdStr in alreadyProcessed) {
+                if (repairTruncatedAssets(repoConfig, releaseIdStr, matchingAssets)) downloadedAny = true
+                continue
+            }
 
             val releaseType = releaseChecker.releaseType(release)
             logger.info("${repoConfig.repo}: processing $releaseType release ${release.tagName}")
 
-            val matchingAssets = releaseChecker.matchingAssets(release, repoConfig)
             if (matchingAssets.isEmpty()) {
                 logger.warn("${repoConfig.repo}: no APK files found in release ${release.tagName}")
                 outcomes.add(AppConfig.GithubReleaseOutcome(releaseIdStr, release.tagName, releaseType, 0, 0))
@@ -75,21 +80,69 @@ class GithubScheduler(
 
             var downloadedCount = 0
             for (asset in matchingAssets) {
-                val destination = File(repoDir, "repo/$releaseIdStr-${asset.name}")
+                val destination = assetFile(releaseIdStr, asset)
+                // Left over from an earlier check that downloaded some but
+                // not all of this release's assets.
+                if (releaseChecker.isComplete(destination, asset)) {
+                    downloadedCount++
+                    continue
+                }
                 if (releaseChecker.downloadAsset(repoConfig.repo, asset, destination)) {
                     downloadedCount++
                     downloadedAny = true
                 }
             }
             logger.info("${repoConfig.repo}: downloaded $downloadedCount/${matchingAssets.size} APK(s) from ${release.tagName}")
+            // Only mark the release as processed once every asset is in
+            // place, so a failed download is retried on the next check
+            // instead of being skipped forever.
+            if (downloadedCount < matchingAssets.size) {
+                logger.warn("${repoConfig.repo}: ${release.tagName} incomplete, will retry on the next check")
+                continue
+            }
             outcomes.add(AppConfig.GithubReleaseOutcome(releaseIdStr, release.tagName, releaseType, matchingAssets.size, downloadedCount))
         }
 
-        if (outcomes.isEmpty()) return false
-
-        appConfig.recordGithubOutcomes(repoConfig.repo, outcomes)
+        if (outcomes.isNotEmpty()) appConfig.recordGithubOutcomes(repoConfig.repo, outcomes)
 
         return downloadedAny
+    }
+
+    private fun assetFile(releaseId: String, asset: GitHubReleaseChecker.GitHubAsset) =
+        File(repoDir, "repo/$releaseId-${asset.name}")
+
+    /** Re-downloads assets of an already-processed release whose file is
+     * still in the repo but truncated (left by older versions of the
+     * downloader). Missing files are left alone: pruning removes them on
+     * purpose. Returns true if anything was replaced. */
+    private suspend fun repairTruncatedAssets(
+        repoConfig: GitHubReleaseChecker.RepoConfig,
+        releaseId: String,
+        assets: List<GitHubReleaseChecker.GitHubAsset>,
+    ): Boolean {
+        var repaired = false
+        for (asset in assets) {
+            val destination = assetFile(releaseId, asset)
+            if (!destination.isFile || releaseChecker.isComplete(destination, asset)) continue
+            logger.warn("${repoConfig.repo}: ${destination.name} is truncated (${destination.length()} bytes, expected ${asset.size}), re-downloading")
+            if (releaseChecker.downloadAsset(repoConfig.repo, asset, destination)) repaired = true
+        }
+        return repaired
+    }
+
+    /** Deletes APKs in the repo dir that don't open as a zip, which
+     * `fdroid update` rejects anyway ("EOCD signature not found"). Catches
+     * truncated downloads from releases no longer in the checked window.
+     * Returns true if anything was deleted. */
+    private fun removeCorruptApks(): Boolean {
+        val files = File(repoDir, "repo").listFiles { f -> f.isFile && f.extension == "apk" } ?: return false
+        var removed = false
+        for (file in files) {
+            if (releaseChecker.isValidZip(file)) continue
+            logger.warn("Removing corrupt APK ${file.name} (${file.length()} bytes)")
+            if (file.delete()) removed = true
+        }
+        return removed
     }
 
     /** Keeps only the newest [maxVersionsPerApp] APKs per app in the repo

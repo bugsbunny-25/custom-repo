@@ -17,6 +17,7 @@ import app.fdroidserver.patching.PatchWorkerEntryPoint
 import app.fdroidserver.patching.PatchWorkerLauncher
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -24,6 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import java.io.File
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -105,7 +107,16 @@ fun main(args: Array<String>) {
     // snapshotted once here, same as the existing githubScheduler already
     // did (a token changed later via Settings takes effect on the next
     // restart, not immediately - not new behavior introduced here).
-    val githubHttpClient = HttpClient(CIO)
+    // CIO's default 15s request timeout covers the whole response body and
+    // silently cuts off large APK downloads, so give release downloads room
+    // and rely on the socket timeout to catch a stalled connection instead.
+    val githubHttpClient = HttpClient(CIO) {
+        install(HttpTimeout) {
+            requestTimeoutMillis = 60.minutes.inWholeMilliseconds
+            connectTimeoutMillis = 30.seconds.inWholeMilliseconds
+            socketTimeoutMillis = 2.minutes.inWholeMilliseconds
+        }
+    }
     val initialGithubToken = runBlocking { appConfig.getSettings() }.githubToken.ifBlank { null }
     val releaseChecker = GitHubReleaseChecker(githubHttpClient, initialGithubToken)
 
