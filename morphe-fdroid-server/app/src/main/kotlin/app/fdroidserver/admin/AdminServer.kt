@@ -1,5 +1,6 @@
 package app.fdroidserver.admin
 
+import app.fdroidserver.admin.routes.adminUiRoutes
 import app.fdroidserver.admin.routes.patchLibraryRoutes
 import app.fdroidserver.admin.routes.patchTargetRoutes
 import app.fdroidserver.admin.routes.repoRoutes
@@ -12,10 +13,8 @@ import app.fdroidserver.github.GithubScheduler
 import app.fdroidserver.patching.PatchLibrary
 import app.fdroidserver.patching.PatchSourceScheduler
 import app.fdroidserver.patching.PatchScheduler
-import io.ktor.http.ContentType
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
-import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
@@ -24,8 +23,6 @@ import io.ktor.server.engine.connector
 import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.server.response.respondText
-import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
@@ -34,12 +31,11 @@ import java.io.File
 
 /**
  * The admin web UI + JSON API - direct replacement for the old Python
- * `config_ui.py`'s stdlib `ThreadingHTTPServer`. Uses Ktor instead, but the
- * HTML/JS (`resources/admin.html`, ported close to verbatim from
- * `config_ui.py`'s embedded `HTML` string) and every JSON API endpoint's
- * path, method, and JSON shape are unchanged, so the UI itself required no
- * redesign - only its backend implementation changed (now SQLite via
- * [AppConfig] instead of `config.yml`/`cache.json` files).
+ * `config_ui.py`'s stdlib `ThreadingHTTPServer`. The UI is a static page
+ * (`resources/admin/index.html` + `admin.css` + `admin.js`, served by
+ * [adminUiRoutes]) that talks to the JSON API below; every endpoint's path,
+ * method, and JSON shape matches the Python version, now backed by SQLite
+ * via [AppConfig] instead of `config.yml`/`cache.json` files.
  *
  * JSON field names: the ported admin UI JS expects snake_case keys
  * (`include_prereleases`, `apkmirror_url`, etc.). Rather than annotate every
@@ -66,12 +62,6 @@ class AdminServer(
     private val host: String = "0.0.0.0",
     private val port: Int = 5001,
 ) {
-    private val adminHtml: String by lazy {
-        AdminServer::class.java.classLoader.getResourceAsStream("admin.html")
-            ?.bufferedReader()?.use { it.readText() }
-            ?: error("admin.html resource not found on classpath")
-    }
-
     private var engine: EmbeddedServer<out ApplicationEngine, out ApplicationEngine.Configuration>? = null
 
     fun start() {
@@ -114,8 +104,7 @@ class AdminServer(
             )
         }
         routing {
-            get("/admin") { call.respondText(adminHtml, ContentType.Text.Html) }
-            get("/admin/") { call.respondText(adminHtml, ContentType.Text.Html) }
+            adminUiRoutes()
             setupRoutes(appConfig, fdroidRepoManager, repoDir, patchedRepoDir, patchedTvRepoDir)
             settingsRoutes(appConfig, fdroidRepoManager, repoDir, patchedRepoDir, patchedTvRepoDir)
             repoRoutes(appConfig, githubScheduler)
