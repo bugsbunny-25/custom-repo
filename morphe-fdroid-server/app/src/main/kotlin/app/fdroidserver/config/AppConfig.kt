@@ -473,11 +473,9 @@ class AppConfig(private val db: AppDatabase) {
      * patch source for [id] - the auto-update counterpart to
      * [updatePatchInLibrary], called by
      * [app.fdroidserver.patching.PatchSourceScheduler] after it
-     * downloads a new release's `.mpp` asset. Always treated as a content
-     * update (unlike [updatePatchInLibrary], which only resets
-     * customizations/cache when a new file was actually uploaded) - the
-     * caller is expected to follow up with [resetPatchCustomizations] and
-     * [invalidatePatchCache], same as a manual file update via the admin UI. */
+     * downloads a new release's `.mpp` asset. Unlike a manual file update
+     * via the admin UI, the caller keeps the attachments' customizations and
+     * the patched-version history - see the comment at its call site. */
     suspend fun recordPatchLibrarySourceUpdate(
         schema: PatchSchema,
         id: String,
@@ -898,10 +896,11 @@ class AppConfig(private val db: AppDatabase) {
         }
     }
 
-    suspend fun processedPatchCacheKeys(schema: PatchSchema, targetId: String): Set<String> = db.tx {
-        schema.checkedEntries.selectAll().where { schema.checkedEntries.targetId eq targetId }
-            .map { it[schema.checkedEntries.cacheKey] }
-            .toSet()
+    /** Every recorded (version, patch, bundle version) result for [targetId] -
+     * what [app.fdroidserver.patching.PatchUpdatePolicy] reads the stored
+     * combo from. */
+    suspend fun patchCheckedEntries(schema: PatchSchema, targetId: String): List<PatchCheckedEntry> = db.tx {
+        checkedEntriesForTarget(schema, targetId)
     }
 
     /** Records one successfully-applied (target, patch, version) result -

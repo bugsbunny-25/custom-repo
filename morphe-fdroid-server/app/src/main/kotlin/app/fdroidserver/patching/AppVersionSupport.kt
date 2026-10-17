@@ -34,6 +34,36 @@ data class AppVersionSupport(
         else -> versions.filterNot { it in experimentalVersions }
     }
 
+    companion object {
+        /**
+         * The versions worth patching for a package across every enabled
+         * patch in a bundle that names it ([supports], one per patch).
+         *
+         * Patches that run on any version don't narrow anything, so only the
+         * version-restricted ones decide; of those, the versions the most
+         * patches support win - the same "recommended version" idea the
+         * Morphe manager uses, and the intersection whenever the patches
+         * agree. Taking the first patch's list instead (what this used to
+         * do) let one "any version" patch, such as a branding patch, open the
+         * door to app versions the main patches don't support; the engine
+         * then silently skipped those and published a mostly unpatched APK.
+         * `"*"` when every patch runs on any version; empty when none of them
+         * can run without the experimental opt-in.
+         */
+        fun mergedPatchableVersions(supports: List<AppVersionSupport>, includeExperimental: Boolean): List<String> {
+            val perPatch = supports.map { it.patchableVersions(includeExperimental) }.filter { it.isNotEmpty() }
+            val restricted = perPatch.filter { "*" !in it }
+            if (restricted.isEmpty()) return if (perPatch.isNotEmpty()) listOf("*") else emptyList()
+
+            val counts = LinkedHashMap<String, Int>()
+            for (versions in restricted) {
+                for (v in versions.distinct()) counts[v] = (counts[v] ?: 0) + 1
+            }
+            val best = counts.values.max()
+            return counts.filterValues { it == best }.keys.toList()
+        }
+    }
+
     /** Whether [version] is declared, honouring the experimental flag. */
     fun supports(version: String, includeExperimental: Boolean): Boolean {
         if (anyVersion || (includeExperimental && anyVersionExperimental)) return true

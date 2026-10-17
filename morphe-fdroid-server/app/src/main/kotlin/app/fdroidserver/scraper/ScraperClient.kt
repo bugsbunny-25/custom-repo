@@ -15,6 +15,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.StandardOpenOption
 import java.time.Duration
+import java.util.zip.ZipFile
 import kotlin.random.Random
 import org.slf4j.Logger
 
@@ -261,35 +262,60 @@ abstract class ScraperClient(
     protected fun parse(html: String, baseUrl: String): Document = Jsoup.parse(html, baseUrl)
 
     /** Streams [url] to [destination]. If [referer] is provided, it will be
-     * sent as the Referer request header. Returns true on success. */
+     * sent as the Referer request header. Returns true on success.
+     *
+     * A download only counts if it's complete and actually an APK/bundle:
+     * the byte count has to match `Content-Length` when the server sends one,
+     * and the file has to open as a zip (APK, `.apkm`, `.xapk` and `.apks`
+     * all are). Without that, a cut-off transfer or an HTML error/challenge
+     * page served with a 200 was handed on to the merger and patcher, which
+     * then failed with errors that pointed nowhere near the download. One
+     * retry covers a transfer dropped mid-way. */
     fun downloadApk(url: String, destination: File, referer: String? = null): Boolean {
-        return try {
-            // Use the same HttpClient (and thus the same cookie jar) that
-            // resolved the download chain, rather than a bare URLConnection -
-            // that's what makes the final asset request look like a
-            // continuation of the browsing session instead of a cookieless,
-            // out-of-nowhere request that Cloudflare rejects with 403.
-            val request = requestBuilder(url, referer).GET().build()
-            destination.parentFile?.mkdirs()
-            val response = httpClient.send(
-                request,
-                HttpResponse.BodyHandlers.ofFile(
-                    destination.toPath(),
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE,
-                ),
-            )
-            if (response.statusCode() !in 200..299) {
-                error("HTTP ${response.statusCode()} downloading $url")
+        for (attempt in 1..DOWNLOAD_ATTEMPTS) {
+            try {
+                downloadOnce(url, destination, referer)
+                return true
+            } catch (e: Exception) {
+                logger.error("$sourceName: error downloading $url (attempt $attempt/$DOWNLOAD_ATTEMPTS): $e")
+                destination.delete()
             }
-            true
-        } catch (e: Exception) {
-            logger.error("$sourceName: error downloading $url: $e")
-            destination.delete()
-            false
+        }
+        return false
+    }
+
+    private fun downloadOnce(url: String, destination: File, referer: String?) {
+        // Use the same HttpClient (and thus the same cookie jar) that
+        // resolved the download chain, rather than a bare URLConnection -
+        // that's what makes the final asset request look like a
+        // continuation of the browsing session instead of a cookieless,
+        // out-of-nowhere request that Cloudflare rejects with 403.
+        val request = requestBuilder(url, referer).GET().build()
+        destination.parentFile?.mkdirs()
+        val response = httpClient.send(
+            request,
+            HttpResponse.BodyHandlers.ofFile(
+                destination.toPath(),
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE,
+            ),
+        )
+        if (response.statusCode() !in 200..299) {
+            error("HTTP ${response.statusCode()} downloading $url")
+        }
+        val expected = response.headers().firstValueAsLong("Content-Length")
+        if (expected.isPresent && expected.asLong != destination.length()) {
+            error("incomplete download: got ${destination.length()} of ${expected.asLong} bytes")
+        }
+        if (!isZipArchive(destination)) {
+            val type = response.headers().firstValue("Content-Type").orElse("unknown type")
+            error("downloaded file is not an APK or APK bundle ($type, ${destination.length()} bytes)")
         }
     }
+
+    private fun isZipArchive(file: File): Boolean =
+        runCatching { ZipFile(file).use { it.size() > 0 } }.getOrDefault(false)
 
     companion object {
         // Both sites block requests with non-browser User-Agents.
@@ -313,6 +339,7 @@ abstract class ScraperClient(
         private val CLOUDFLARE_CHALLENGE_RE = Regex("""<title>Just a moment\.\.\.</title>|_cf_chl_opt|challenges\.cloudflare\.com""")
 
         private const val MAX_FETCH_ATTEMPTS = 1
+        private const val DOWNLOAD_ATTEMPTS = 2
         private const val BASE_RETRY_DELAY_MS = 1_500L
         private const val MAX_RETRY_DELAY_MS = 8_000L
         private const val JITTER_MS = 750L

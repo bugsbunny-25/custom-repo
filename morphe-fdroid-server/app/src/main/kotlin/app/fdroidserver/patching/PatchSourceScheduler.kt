@@ -126,13 +126,16 @@ class PatchSourceScheduler(
                 false
             }
             is AppConfig.Result.Ok -> {
-                // Same follow-up as a manual re-upload via the admin UI: the
-                // new .mpp may add/remove/rename sub-patches or options, so
-                // stale per-target overrides and cached processed versions
-                // could reference things that no longer exist / need
-                // re-checking against the new file.
-                appConfig.resetPatchCustomizations(schema, entry.id)
-                appConfig.invalidatePatchCache(schema, entry.id)
+                // Unlike a manual re-upload, an automatic update keeps both the
+                // per-target patch selection/options and the patched-version
+                // history. The selection is matched by patch name and unknown
+                // names/options are ignored (see PatchSelector), so a renamed
+                // or removed patch can't break a run - while wiping it would
+                // silently re-enable every patch the operator turned off, on
+                // every release. And the history is what PatchUpdatePolicy
+                // compares the new bundle version against: the newest app
+                // version is re-patched once because the bundle moved up,
+                // instead of every listed version looking unpatched again.
                 logger.info("${entry.id}: imported ${latest.tagName} from ${entry.sourceUrl} (asset: ${asset.name})")
                 true
             }
