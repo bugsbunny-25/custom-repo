@@ -6,24 +6,23 @@
 package app.morphe.engine.patches
 
 import app.morphe.engine.GitHubPatMissingException
+import app.morphe.engine.config.EngineConfigRepository
 import app.morphe.engine.model.Release
 import app.morphe.engine.model.ReleaseAsset
 import app.morphe.engine.network.HttpService
+import app.morphe.engine.util.Logger
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/**
- * Remote patch source for GitHub Pull Requests.
- *
- * Resolves patch bundles built as GitHub Actions artifacts for a pull request's HEAD commit SHA.
- * Downloads require a Personal Access Token (PAT) with `public_repo` scope.
- */
+/** Remote patch source resolving GitHub Actions build artifacts for a pull request. */
 class PullRequestPatchSource(
     http: HttpService,
     val owner: String,
     val repo: String,
     val prNumber: String,
+    private val patProvider: suspend () -> String? = ::defaultGitHubPatProvider,
 ) : GitHubPatchSource(http, "$owner/$repo") {
 
     override val provider: PatchProvider = PatchProvider.GITHUB_PR
@@ -37,7 +36,6 @@ class PullRequestPatchSource(
             cachedRelease = release
             Result.success(listOf(release))
         } catch (e: Exception) {
-            logger.warning("GitHub PR: release resolution failed for $repoPath#$prNumber: ${e.message}")
             Result.failure(e)
         }
     }
@@ -49,21 +47,15 @@ class PullRequestPatchSource(
             cachedRelease = release
             Result.success(release)
         } catch (e: Exception) {
-            logger.warning("GitHub PR: manifest/asset resolution failed for $repoPath#$prNumber: ${e.message}")
             Result.failure(e)
         }
     }
 
-    // Local delta: upstream reads the PAT from the desktop app's ConfigRepository
-    // (app.morphe.gui), which isn't vendored. The server only has the env vars.
-    private fun getGitHubPat(): String? {
-        return System.getenv("GITHUB_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
-            ?: System.getenv("GH_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
-    }
+    private suspend fun getGitHubPat(): String? = patProvider()
 
     private suspend fun resolvePrRelease(): Release {
         val pat = getGitHubPat()
-        logger.info("GitHub PR: resolving artifact for $owner/$repo#$prNumber (auth=${pat != null})")
+        Logger.info("GitHub PR: resolving artifact for $owner/$repo#$prNumber (auth=${pat != null})")
         val prAsset = http.getAssetFromPullRequest(owner, repo, prNumber, pat)
 
         val assetName = if (prAsset.artifactName.endsWith(".mpp", ignoreCase = true)) {
@@ -76,7 +68,7 @@ class PullRequestPatchSource(
             id = 0L,
             name = assetName,
             downloadUrl = prAsset.downloadUrl,
-            size = 0L, // 0L prevents PatchRepository cache checks from failing against unzipped file size
+            size = 0L, // 0L prevents cache checks from failing against unzipped file size
             contentType = "application/zip",
         )
 
@@ -103,13 +95,29 @@ class PullRequestPatchSource(
                 throw GitHubPatMissingException("A GitHub PAT is required to download pull request sources")
             }
 
-            logger.info("GitHub PR: downloading ${asset.name} for $repoPath#$prNumber from ${asset.downloadUrl}")
+            Logger.info("GitHub PR: downloading ${asset.name} for $repoPath#$prNumber from ${asset.downloadUrl}")
             val file = http.downloadPrArtifactToFile(asset.downloadUrl, targetFile, pat, onProgress)
-            logger.info("GitHub PR: downloaded ${file.length()} bytes to ${file.absolutePath}")
+            Logger.info("GitHub PR: downloaded ${file.length()} bytes to ${file.absolutePath}")
             Result.success(file)
         } catch (e: Exception) {
-            logger.warning("GitHub PR download failed: ${e.message}")
             Result.failure(e)
+        }
+    }
+
+    companion object {
+        /** Reads GitHub PAT from config or GITHUB_TOKEN/GH_TOKEN environment variables. */
+        suspend fun defaultGitHubPatProvider(): String? = withContext(Dispatchers.IO) {
+            val fromConfig = try {
+                EngineConfigRepository.shared.getGitHubPat().trim().takeIf { it.isNotEmpty() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+
+            fromConfig
+                ?: System.getenv("GITHUB_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: System.getenv("GH_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
         }
     }
 }
