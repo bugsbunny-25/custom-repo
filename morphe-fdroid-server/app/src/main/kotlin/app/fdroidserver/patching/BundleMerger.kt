@@ -1,6 +1,6 @@
 package app.fdroidserver.patching
 
-import app.morphe.engine.util.BundleFormats
+import app.morphe.engine.apk.BundleFormats
 import app.morphe.patcher.apk.ApkMerger
 import app.morphe.patcher.logging.toMorpheLogger
 import java.io.File

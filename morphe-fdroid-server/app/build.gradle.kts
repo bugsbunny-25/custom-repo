@@ -41,6 +41,14 @@ dependencies {
     // compiles against, so the pinned version tracks morphe-desktop's own catalog.
     implementation(libs.morphe.patcher)
 
+    // ARSCLib - the resource/manifest library morphe-patcher is built on. It
+    // already arrives transitively at runtime; declared here because the
+    // vendored engine's apk/ApkInspector.kt reads AndroidManifest blocks
+    // (com.reandroid.arsc) directly, and a transitive `implementation`
+    // dependency isn't on our compile classpath. Same module and version the
+    // patcher resolves, so nothing is duplicated in the shadow jar.
+    implementation(libs.arsclib)
+
     implementation(libs.ktor.server.netty)
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.content.negotiation)

@@ -123,6 +123,10 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
             ),
             signerName = signing.signerName,
             tempDir = workDir,
+            // The engine's own patch history (a JSON store under its data
+            // directory, plus a SHA-256 of every output APK) duplicates what
+            // this server already keeps in SQLite, and nothing here reads it.
+            recordHistory = false,
         )
 
         val result = try {
@@ -145,7 +149,7 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
                 RuntimeException("patched APK is ${result.packageName}, expected $packageName"),
             )
         }
-        return ApplyResult.Success(result.packageName, result.packageVersionName, result.appliedPatches)
+        return ApplyResult.Success(result.packageName, result.packageVersion, result.appliedPatches)
     }
 
     /** Flattens the engine's per-step / per-patch failure detail into one

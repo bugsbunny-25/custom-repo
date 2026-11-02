@@ -6,6 +6,7 @@ import app.morphe.engine.model.Release
 import app.morphe.engine.model.ReleaseAsset
 import app.morphe.engine.patches.RemotePatchSource
 import app.morphe.engine.patches.RemotePatchSourceFactory
+import app.morphe.engine.util.normalizeVersion
 import io.ktor.client.HttpClient
 import java.io.File
 import org.slf4j.Logger
@@ -118,7 +119,7 @@ class PatchSourceScheduler(
         }
 
         val result = appConfig.recordPatchLibrarySourceUpdate(
-            schema, entry.id, latest.getVersion(), storedName, latest.tagName,
+            schema, entry.id, latest.tagName.normalizeVersion(), storedName, latest.tagName,
         )
         return when (result) {
             is AppConfig.Result.Error -> {
@@ -197,7 +198,7 @@ class PatchSourceScheduler(
         if (patchAssets.size == 1) return patchAssets.single()
 
         val tag = release.tagName
-        val normalizedTag = release.getVersion()
+        val normalizedTag = release.tagName.normalizeVersion()
         val tagMatches = patchAssets.filter { asset ->
             asset.name.contains(tag, ignoreCase = true) || asset.name.contains(normalizedTag, ignoreCase = true)
         }

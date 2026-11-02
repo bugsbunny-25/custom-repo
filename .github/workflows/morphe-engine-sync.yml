@@ -75,7 +75,7 @@ jobs:
             | from | `${{ steps.sync.outputs.from_tag }}` |
             | to | `${{ steps.sync.outputs.to_tag }}` |
             | local deltas | **${{ steps.sync.outputs.delta_status }}** |
-            | morphe-patcher | ${{ steps.sync.outputs.patcher_note }} |
+            | dependency pins | ${{ steps.sync.outputs.patcher_note }} |
 
             **Local deltas**
             ${{ steps.sync.outputs.delta_notes }}
@@ -84,7 +84,9 @@ jobs:
 
             ${{ steps.sync.outputs.added_files && format('🆕 **New upstream files pulled in:** `{0}` - vendored code now depends on these. Check each is headless (no desktop-only `app.morphe.gui` or data-dir code); if it needs changes to compile here, add a local delta.', steps.sync.outputs.added_files) || '' }}
 
-            ${{ steps.sync.outputs.missing_files && format('⚠️ **No longer present upstream:** `{0}` - these were renamed, split, or deleted. Do not just merge; work out where they went.', steps.sync.outputs.missing_files) || '' }}
+            ${{ steps.sync.outputs.moved_files && format('↪️ **Followed upstream renames:** `{0}` - the vendored copy was moved to upstream''s new path and refreshed there. Check nothing outside the engine still imports the old package.', steps.sync.outputs.moved_files) || '' }}
+
+            ${{ steps.sync.outputs.missing_files && format('⚠️ **No longer present upstream:** `{0}` - these were split or deleted (an unambiguous rename is followed automatically). Do not just merge; work out where they went.', steps.sync.outputs.missing_files) || '' }}
 
             **Before merging**
             - Read the `PatchEngine.kt` / `PatchExtensions.kt` diff rather than
@@ -96,7 +98,8 @@ jobs:
             - A `morphe-patcher` bump means the patcher API may have moved
               under the engine *and* under `app.fdroidserver.patching`. The
               build failing is the obvious signal; a silently changed default
-              is not.
+              is not. `ARSCLib` moves with it, since the engine reads APK
+              manifests through it directly.
             - Check [upstream's release notes](https://github.com/MorpheApp/morphe-desktop/releases/tag/${{ steps.sync.outputs.to_tag }}).
 
             Raised by `.github/workflows/morphe-engine-sync.yml`. To do this by
