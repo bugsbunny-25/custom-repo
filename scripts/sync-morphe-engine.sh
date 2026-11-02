@@ -82,39 +82,114 @@ done < <(cd "$LOCAL_ENGINE_DIR" && find . -name '*.kt' -type f | sed 's|^\./||' 
 
 echo "copied $copied file(s)"
 
-# The loop above only refreshes files we already have, so a file upstream adds
+# Upstream reorganising the package (v1.20.0 moved `PatchExtensions.kt` into
+# `patches/` and `util/BundleFormats.kt` into `apk/`) leaves a vendored file
+# with no upstream counterpart at its old path, while the pull-in step below
+# copies the very same declarations in at the new one - two top-level copies of
+# one type, which doesn't compile. Follow an unambiguous rename instead: when
+# exactly one upstream file carries that basename, the file moved, so move ours
+# with it (keeping its history) and take the fresh copy there.
+moved=()
+still_missing=()
+for rel in ${missing[@]+"${missing[@]}"}; do
+  candidates=$(cd "$upstream_engine" && find . -name "$(basename "$rel")" -type f | sed 's|^\./||')
+  if [ "$(printf '%s\n' "$candidates" | grep -c .)" = "1" ]; then
+    new_rel="$candidates"
+    mkdir -p "$LOCAL_ENGINE_DIR/$(dirname "$new_rel")"
+    git mv "$LOCAL_ENGINE_DIR/$rel" "$LOCAL_ENGINE_DIR/$new_rel"
+    cp "$upstream_engine/$new_rel" "$LOCAL_ENGINE_DIR/$new_rel"
+    echo "moved upstream: $rel -> $new_rel"
+    moved+=("$rel -> $new_rel")
+  else
+    still_missing+=("$rel")
+  fi
+done
+missing=(${still_missing[@]+"${still_missing[@]}"})
+
+if [ ${#moved[@]} -gt 0 ]; then
+  emit "moved_files=${moved[*]}"
+fi
+
+# The copy loop only refreshes files we already have, so a file upstream adds
 # is never picked up - even when a vendored file now depends on it (v1.17.0's
 # RemotePatchSourceFactory started using the new PullRequestPatchSource, and
-# the sync PR failed to compile). Pull in any new upstream file declaring a
-# type that vendored code references, repeating until nothing more is needed,
-# since a pulled-in file can depend on yet another new one. Only type
-# declarations are matched, and comments are ignored, so a desktop-only file
-# isn't dragged in because a vendored comment happens to mention it.
-declared_types() { # the class/object/interface/typealias names a .kt file declares,
-                   # plus its public top-level functions (v1.18.0's
-                   # PatchEngine started calling the extension function
-                   # File.deleteRecursivelyInParallel from a new util file that
-                   # declares no type, and the sync PR failed to compile)
-  grep -oE '^[[:space:]]*((public|internal|private|sealed|data|enum|abstract|open|annotation|value|inline|fun)[[:space:]]+)*(class|object|interface|typealias)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$1" \
+# the sync PR failed to compile). Pull in any new upstream file that declares
+# something vendored code actually references, repeating until nothing more is
+# needed, since a pulled-in file can depend on yet another new one.
+declared_names() { # the *top-level* names a .kt file declares - classes,
+                   # objects, interfaces, typealiases - plus its public
+                   # top-level functions (v1.18.0's PatchEngine started calling
+                   # the extension function File.deleteRecursivelyInParallel
+                   # from a new util file that declares no type, and the sync PR
+                   # failed to compile).
+                   #
+                   # Top-level only, anchored with no leading whitespace: a
+                   # nested name can't be referenced by its simple name anyway,
+                   # and matching one drags a whole file in on a word as common
+                   # as `Error` (upstream's patches/PatchResolver.kt declares a
+                   # nested one).
+  grep -oE '^((public|internal|private|sealed|data|enum|abstract|open|annotation|value|inline|fun)[[:space:]]+)*(class|object|interface|typealias)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$1" \
     | awk '{print $NF}'
   grep -E '^((public|internal|inline|suspend|operator|infix)[[:space:]]+)*fun[[:space:]]' "$1" \
     | sed -nE 's/\(.*//; s/^.*[[:space:].>]([A-Za-z_][A-Za-z0-9_]*)$/\1/p'
 }
-vendored_code() { # every vendored .kt file, minus comment lines
-  find "$LOCAL_ENGINE_DIR" -name '*.kt' -type f -exec cat {} + \
-    | grep -vE '^[[:space:]]*(//|/?\*)'
+
+kt_package() { awk '/^package /{print $2; exit}' "$1"; }
+
+# Vendored code with comment lines stripped, kept as *files*: one per package,
+# plus one holding the lot. Two reasons this isn't a pipeline into `grep -q`:
+#
+#   * `grep -q` stops reading at its first match, so the writing end of the
+#     pipe takes SIGPIPE - and under `set -o pipefail` that failed the test
+#     (exit 141) for names that matched early in the stream while passing for
+#     ones near its end. That is exactly how the v1.19.0/v1.19.1/v1.20.0 sync
+#     PRs pulled in `PatchedAppStore.kt` yet silently missed `util/Logger.kt`
+#     and the dozen other files the reorganised engine needs: all three failed
+#     to compile.
+#   * a reference resolves without an import only inside the *same* package, so
+#     the test has to know which package each line came from.
+blob_dir="$workdir/vendored-by-package"
+all_vendored="$workdir/vendored-all"
+mkdir -p "$blob_dir"
+: > "$all_vendored"
+index_vendored() { # <vendored .kt file>
+  local pkg
+  pkg=$(kt_package "$1")
+  grep -vE '^[[:space:]]*(//|/?\*)' "$1" \
+    | tee -a "$blob_dir/${pkg:-unpackaged}" >> "$all_vendored" || true
 }
+while IFS= read -r f; do
+  index_vendored "$f"
+done < <(find "$LOCAL_ENGINE_DIR" -name '*.kt' -type f)
+
+referenced_by_vendored() { # <package of the candidate> <name it declares>
+  pkg="$1"
+  name="$2"
+  # Same package as something we vendor: Kotlin resolves it with no import.
+  if [ -f "$blob_dir/$pkg" ] && grep -qw -- "$name" "$blob_dir/$pkg"; then
+    return 0
+  fi
+  # Anything else has to be imported by name (aliased or not), which keeps a
+  # desktop-only file from being dragged in by a passing mention of a common
+  # word.
+  grep -qE "^import ${pkg//./\\.}\.${name}([[:space:]]|\$)" "$all_vendored"
+}
+
 added=()
 while :; do
   pulled=0
   while IFS= read -r rel; do
     [ -f "$LOCAL_ENGINE_DIR/$rel" ] && continue
-    for type in $(declared_types "$upstream_engine/$rel"); do
-      if vendored_code | grep -qw -- "$type"; then
+    rel_pkg=$(kt_package "$upstream_engine/$rel")
+    for name in $(declared_names "$upstream_engine/$rel"); do
+      if referenced_by_vendored "$rel_pkg" "$name"; then
         mkdir -p "$LOCAL_ENGINE_DIR/$(dirname "$rel")"
         cp "$upstream_engine/$rel" "$LOCAL_ENGINE_DIR/$rel"
-        echo "new upstream file pulled in: $rel (uses $type)"
+        echo "new upstream file pulled in: $rel (uses $name)"
         added+=("$rel")
+        # Its own references count from here on, so whatever *it* newly needs
+        # follows on the next pass.
+        index_vendored "$LOCAL_ENGINE_DIR/$rel"
         pulled=1
         break
       fi
@@ -127,9 +202,9 @@ if [ ${#added[@]} -gt 0 ]; then
   emit "added_files=${added[*]}"
 fi
 
-# A vendored file disappearing upstream is a real signal (renamed, split, or
-# deleted), not something to paper over - surface it rather than silently
-# keeping our now-orphaned copy.
+# Whatever is still missing after the rename check above was split or deleted
+# upstream, which is a real signal, not something to paper over - surface it
+# rather than silently keeping our now-orphaned copy.
 if [ ${#missing[@]} -gt 0 ]; then
   echo "WARNING: no longer present upstream: ${missing[*]}"
   emit "missing_files=${missing[*]}"
@@ -166,20 +241,36 @@ for patch in "$LOCAL_ENGINE_DIR"/local-deltas/*.patch; do
 done
 shopt -u nullglob
 
-# The engine is compiled against a specific morphe-patcher; upstream's own
-# catalog is the source of truth for which one.
-upstream_patcher=$(awk -F'"' '/^morphe-patcher = "/ {print $2}' \
-  "$workdir/upstream/gradle/libs.versions.toml" 2>/dev/null || true)
-our_patcher=$(awk -F'"' '/^morphe-patcher = "/ {print $2}' "$LOCAL_CATALOG")
-patcher_note="unchanged ($our_patcher)"
-if [ -n "$upstream_patcher" ] && [ "$upstream_patcher" != "$our_patcher" ]; then
-  echo "morphe-patcher: $our_patcher -> $upstream_patcher"
-  # sed over the catalog rather than a template rewrite, to leave the long
-  # explanatory comment block above the pin untouched.
-  sed -i.bak "s|^morphe-patcher = \"$our_patcher\"|morphe-patcher = \"$upstream_patcher\"|" "$LOCAL_CATALOG"
-  rm -f "$LOCAL_CATALOG.bak"
-  patcher_note="**$our_patcher -> $upstream_patcher**"
-fi
+# The engine is compiled against a specific morphe-patcher, and - since
+# apk/ApkInspector.kt reads manifests through ARSCLib directly - a specific
+# ARSCLib too. Upstream's own catalog is the source of truth for both.
+upstream_catalog="$workdir/upstream/gradle/libs.versions.toml"
+pin_notes=""
+# Sets $pin_version to whatever the pin now reads and appends to $pin_notes -
+# globals rather than a value on stdout, since a command substitution would run
+# this in a subshell and lose the note (and swallow the progress line below).
+sync_pin() { # <version key> <label>
+  local key="$1" label="$2" theirs ours
+  theirs=$(awk -F'"' -v k="^$key = \"" '$0 ~ k {print $2}' "$upstream_catalog" 2>/dev/null || true)
+  ours=$(awk -F'"' -v k="^$key = \"" '$0 ~ k {print $2}' "$LOCAL_CATALOG")
+  if [ -n "$theirs" ] && [ "$theirs" != "$ours" ]; then
+    echo "$label: $ours -> $theirs"
+    # sed over the catalog rather than a template rewrite, to leave the long
+    # explanatory comment blocks above the pins untouched.
+    sed -i.bak "s|^$key = \"$ours\"|$key = \"$theirs\"|" "$LOCAL_CATALOG"
+    rm -f "$LOCAL_CATALOG.bak"
+    pin_version="$theirs"
+    pin_notes="${pin_notes}$label **$ours -> $theirs**. "
+  else
+    pin_version="$ours"
+    pin_notes="${pin_notes}$label unchanged ($ours). "
+  fi
+}
+sync_pin morphe-patcher morphe-patcher
+patcher_version="$pin_version"
+sync_pin arsclib ARSCLib
+arsclib_version="$pin_version"
+patcher_note="${pin_notes% }"
 
 # FORK_INFO records what the engine content was actually taken from.
 cat > "$fork_info" <<EOF
@@ -188,7 +279,8 @@ Tag:       $target_tag
 Commit:    $upstream_sha
 Path:      $UPSTREAM_ENGINE_PATH
 Vendored:  $(date -u +%Y-%m-%d)
-Patcher:   app.morphe:morphe-patcher ${upstream_patcher:-$our_patcher} (matches morphe-desktop's own catalog pin)
+Patcher:   app.morphe:morphe-patcher $patcher_version (matches morphe-desktop's own catalog pin)
+ARSCLib:   com.github.MorpheApp:ARSCLib $arsclib_version (likewise)
 
 See README.md in this directory for what was taken, what was left behind, and
 the list of local deltas to re-apply when re-syncing.
@@ -228,4 +320,4 @@ echo
 echo "=== changed ==="
 echo "$changed_files"
 echo "delta status: $delta_status"
-echo "morphe-patcher: $patcher_note"
+echo "pins: $patcher_note"

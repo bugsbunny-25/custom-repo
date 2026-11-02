@@ -1,0 +1,76 @@
+--- a/util/Logger.kt
++++ b/util/Logger.kt
+@@ -23,6 +23,13 @@
+ /** Logs events to file and console. */
+ object Logger {
+ 
++    /**
++     * LOCAL DELTA (see README.md §"Local deltas from upstream"): the JUL logger
++     * every record is handed to, so it reaches logback through
++     * [app.fdroidserver.LoggingBridge] like the rest of the server's output.
++     */
++    private val julLogger: JulLogger = JulLogger.getLogger("app.morphe.engine")
++
+     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+     private val fileTimestampFormat = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+     private var logFile: File? = null
+@@ -66,20 +73,21 @@
+         }
+     }
+ 
+-    /** Bridges java.util.logging for `app.morphe` into this logger. */
+-    private fun installJulBridge() {
+-        val morpheLogger = JulLogger.getLogger("app.morphe")
+-        morpheLogger.useParentHandlers = false
++    /**
++     * LOCAL DELTA (see README.md): no-op here. Upstream points `app.morphe`'s
++     * java.util.logging records at [JulBridgeHandler] so they land in the
++     * desktop app's session log; this server routes all of JUL into logback
++     * instead ([app.fdroidserver.LoggingBridge], with `LevelChangePropagator`
++     * in `logback.xml` pushing `LOG_LEVEL` down onto JUL). Taking
++     * `app.morphe`'s handlers over would cut morphe-patcher's own records out
++     * of that pipe, and - now that [log] emits through JUL - would feed this
++     * logger's records straight back into itself.
++     *
++     * Kept as a function so the `init()` call site stays byte-identical to
++     * upstream. Nothing in this server calls `init()` anyway.
++     */
++    private fun installJulBridge() = Unit
+ 
+-        for (handler in morpheLogger.handlers.toList()) {
+-            if (handler is JulBridgeHandler) {
+-                morpheLogger.removeHandler(handler)
+-            }
+-        }
+-
+-        morpheLogger.addHandler(JulBridgeHandler())
+-    }
+-
+     private class JulBridgeHandler : Handler() {
+         override fun publish(record: LogRecord) {
+             val rawMessage = record.message ?: return
+@@ -143,10 +151,20 @@
+             "${level.name}: $message"
+         }
+ 
+-        when (level) {
+-            Level.ERROR -> System.err.println(logLine)
+-            else -> println(logLine)
+-        }
++        // LOCAL DELTA (see README.md): emit through java.util.logging rather
++        // than printing to stdout/stderr. The engine is the loudest thing in
++        // an unattended patch run, and logback owns this process's output -
++        // going through JUL keeps engine records in the same format, with the
++        // same timestamps, under the same LOG_LEVEL as everything else.
++        julLogger.log(
++            when (level) {
++                Level.DEBUG -> JulLevel.FINE
++                Level.INFO -> JulLevel.INFO
++                Level.WARN -> JulLevel.WARNING
++                Level.ERROR -> JulLevel.SEVERE
++            },
++            message,
++        )
+ 
+         try {
+             logFile?.appendText("$logLine\n")

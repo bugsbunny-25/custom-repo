@@ -13,9 +13,20 @@ with `git apply --directory=`.
 
 | File | What it changes | Why |
 | --- | --- | --- |
-| `0001-filter-on-versionName.patch` | `PatchEngine.kt` filters compatibility on `packageMetadata.versionName` instead of `versionCode`, and `Result` carries both | Upstream compares `versionCode` against `Patch.supportedVersionsFor()`, which returns version *names*. It never bites upstream because its only caller passes `forceCompatibility = true` and the CLI runs a separate pipeline, but this server patches unattended, so every version-scoped patch would be silently skipped. |
-| `0002-pr-source-without-gui-config.patch` | `patches/PullRequestPatchSource.kt` drops the `ConfigRepository` constructor parameter and reads the GitHub PAT from `GITHUB_TOKEN` / `GH_TOKEN` only | Upstream's PAT lookup goes through the desktop GUI's config store (`app.morphe.gui`), which this server doesn't vendor, so the file doesn't compile as-is. |
-| `0003-caller-version-filter.patch` | `PatchEngine.Config` gains an optional `versionFilter`; when set, `filterPatches` asks it whether a patch supports the APK's version instead of checking `Patch.supportedVersionsFor()` | That helper drops `AppTarget(version = null)` and ignores `isExperimental`, so a patch declared as "these versions, plus any other experimentally" was skipped on every unlisted version even when the attachment opted into experimental versions. The server passes `supportsAppVersion` from `app.fdroidserver.patching`. |
+| `0003-caller-version-filter.patch` | `PatchEngine.Config` gains an optional `versionFilter`; when set, `isPatchCompatible` asks it whether a patch supports the APK's version instead of checking `Patch.supportedVersionsFor()` | That helper drops `AppTarget(version = null)` and ignores `isExperimental`, so a patch declared as "these versions, plus any other experimentally" was skipped on every unlisted version even when the attachment opted into experimental versions. The server passes `supportsAppVersion` from `app.fdroidserver.patching`. |
+| `0004-logger-through-jul.patch` | `util/Logger.kt` emits every record through `java.util.logging` instead of `println`/`System.err`, and `installJulBridge()` becomes a no-op | This process's output belongs to logback, which `LoggingBridge` feeds from JUL - the same pipe morphe-patcher's records already take. Printing directly would put the engine's output outside `LOG_LEVEL` and the shared format, and upstream's bridge would hijack `app.morphe`'s JUL handlers (cutting the patcher out, and looping this logger back into itself). |
+
+The numbering is historical - `0001` and `0002` were deleted at the v1.20.0
+sync because upstream adopted both:
+
+- `0001-filter-on-versionName.patch` filtered compatibility on
+  `packageMetadata.versionName` rather than `versionCode`. Upstream now reads
+  `versionName` itself, and `Result.packageVersion` carries the name.
+- `0002-pr-source-without-gui-config.patch` cut the desktop GUI's
+  `ConfigRepository` (and Koin) out of the pull request source's GitHub PAT
+  lookup. Upstream moved that lookup into the engine's own
+  `EngineConfigRepository` behind an injectable `patProvider`, with the same
+  `GITHUB_TOKEN` / `GH_TOKEN` fallback.
 
 ## Adding one
 
