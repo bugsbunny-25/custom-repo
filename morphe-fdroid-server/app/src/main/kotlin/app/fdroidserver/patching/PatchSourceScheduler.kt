@@ -79,7 +79,7 @@ class PatchSourceScheduler(
         if (isAlreadyImported(entry, latest)) return false
         if (isOlderThanImported(entry, latest)) {
             logger.warn(
-                "${entry.id}: latest release on ${entry.sourceUrl} is ${latest.getVersion()}, older than the " +
+                "${entry.id}: latest release on ${entry.sourceUrl} is ${latest.tagName.normalizeVersion()}, older than the " +
                     "imported ${entry.version} (pre-releases ${if (entry.includePrereleases) "on" else "off"}), keeping ${entry.version}",
             )
             return false
@@ -206,7 +206,7 @@ class PatchSourceScheduler(
      */
     internal fun isOlderThanImported(entry: AppConfig.PatchLibrarySourceEntry, release: Release): Boolean {
         if (entry.version.isBlank()) return false
-        return VersionOrder.compare(release.getVersion(), entry.version.removePrefix("v"))?.let { it < 0 } == true
+        return VersionOrder.compare(release.tagName.normalizeVersion(), entry.version.removePrefix("v"))?.let { it < 0 } == true
     }
 
     /** Picks which asset to import when a release has more than one `.mpp`
