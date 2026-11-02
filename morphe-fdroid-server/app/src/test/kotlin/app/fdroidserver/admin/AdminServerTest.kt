@@ -5,6 +5,8 @@ import app.fdroidserver.apkpure.ApkPureClient
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.config.AppDatabase
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
+import app.fdroidserver.github.GitHubReleaseChecker
+import app.fdroidserver.github.GithubScheduler
 import app.fdroidserver.patching.PatchApplier
 import app.fdroidserver.patching.PatchLibrary
 import app.fdroidserver.patching.PatchSourceScheduler
@@ -23,6 +25,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -62,9 +65,10 @@ class AdminServerTest {
         )
         val patchSourceScheduler = PatchSourceScheduler(appConfig, HttpClient(CIO), patchesDir, AppConfig.PatchSchemas.Mobile)
         val patchSourceSchedulerTv = PatchSourceScheduler(appConfig, HttpClient(CIO), patchesTvDir, AppConfig.PatchSchemas.Tv)
+        val githubScheduler = GithubScheduler(appConfig, GitHubReleaseChecker(HttpClient(CIO), null), repoDir, fdroidRepoManager)
         return AdminServer(
             appConfig, PatchLibrary(), patchesDir, fdroidRepoManager, repoDir, patchedRepoDir, patchScheduler, patchSourceScheduler,
-            patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchSourceSchedulerTv,
+            patchesTvDir, patchedTvRepoDir, patchSchedulerTv, patchSourceSchedulerTv, githubScheduler,
         )
     }
 
@@ -74,7 +78,29 @@ class AdminServerTest {
             application { with(server(tempDir)) { configureServer() } }
             val response = client.get("/admin")
             assertEquals(HttpStatusCode.OK, response.status)
-            assertTrue(response.bodyAsText().contains("<title>Repo Config</title>"))
+            val page = response.bodyAsText()
+            assertTrue(page.contains("<title>Repo Config</title>"))
+            assertTrue(page.contains("/admin/assets/admin.css") && page.contains("/admin/assets/admin.js"), "page should link its assets")
+        }
+    }
+
+    @Test
+    fun `admin assets are served with their content types and nothing else is`(@TempDir tempDir: File) {
+        testApplication {
+            application { with(server(tempDir)) { configureServer() } }
+
+            val css = client.get("/admin/assets/admin.css")
+            assertEquals(HttpStatusCode.OK, css.status)
+            assertTrue(css.headers["Content-Type"]!!.startsWith("text/css"), "got ${css.headers["Content-Type"]}")
+            assertEquals("no-cache", css.headers["Cache-Control"])
+
+            val js = client.get("/admin/assets/admin.js")
+            assertEquals(HttpStatusCode.OK, js.status)
+            assertTrue(js.headers["Content-Type"]!!.startsWith("application/javascript"), "got ${js.headers["Content-Type"]}")
+            assertTrue(js.bodyAsText().contains("/api/repos/check-status"))
+
+            assertEquals(HttpStatusCode.NotFound, client.get("/admin/assets/index.html").status)
+            assertEquals(HttpStatusCode.NotFound, client.get("/admin/assets/logback.xml").status)
         }
     }
 
@@ -101,6 +127,44 @@ class AdminServerTest {
             assertTrue(body.contains(""""repo":"termux/termux-app""""), "expected repo field in: $body")
             assertTrue(body.contains(""""include_prereleases":true"""), "expected snake_case key in: $body")
             assertTrue(body.contains(""""max_releases":5"""), "expected snake_case key in: $body")
+        }
+    }
+
+    @Test
+    fun `paused repos stay listed but can't be checked`(@TempDir tempDir: File) {
+        testApplication {
+            application { with(server(tempDir)) { configureServer() } }
+
+            client.post("/api/repos") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"repo":"termux/termux-app","max_releases":5,"apk_pattern":".*\\.apk$","enabled":false}""")
+            }
+
+            val body = client.get("/api/repos").bodyAsText()
+            assertTrue(body.contains(""""repo":"termux/termux-app""""), "paused repo should be listed: $body")
+            assertTrue(body.contains(""""enabled":false"""), "expected enabled=false in: $body")
+            val id = Regex(""""id":(\d+)""").find(body)!!.groupValues[1]
+            assertEquals(HttpStatusCode.BadRequest, client.post("/api/repos/$id/check").status)
+        }
+    }
+
+    @Test
+    fun `check now runs in the background and reports through check-status`(@TempDir tempDir: File) {
+        testApplication {
+            application { with(server(tempDir)) { configureServer() } }
+
+            assertEquals(HttpStatusCode.BadRequest, client.post("/api/repos/999/check").status)
+
+            // No repos configured, so the check finishes without any network call.
+            assertEquals(HttpStatusCode.Accepted, client.post("/api/repos/check").status)
+            var status = client.get("/api/repos/check-status").bodyAsText()
+            for (attempt in 1..50) {
+                if (!status.contains(""""running":true""")) break
+                Thread.sleep(100)
+                status = client.get("/api/repos/check-status").bodyAsText()
+            }
+            assertFalse(status.contains(""""running":true"""), "check never finished: $status")
+            assertTrue(status.contains(""""finished_at":"""), "expected snake_case finished_at in: $status")
         }
     }
 

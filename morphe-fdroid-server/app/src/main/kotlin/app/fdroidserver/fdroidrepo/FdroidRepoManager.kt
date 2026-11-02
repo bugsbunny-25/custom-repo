@@ -135,13 +135,20 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
      * its own comment on that), which would otherwise have a newer mtime
      * than the actual latest version and push it out of the keep-window.
      */
-    fun pruneOldVersions(repoDir: File, maxVersions: Int, groupKey: (File) -> String) {
+    fun pruneOldVersions(
+        repoDir: File,
+        maxVersions: Int,
+        // Callers whose file names carry versions that don't split cleanly on
+        // dots (PatchScheduler's "+rc1-..." suffixes) pass their own order.
+        versionOrder: (File, File) -> Int = { a, b -> compareVersions(extractVersion(a), extractVersion(b)) },
+        groupKey: (File) -> String,
+    ) {
         if (maxVersions <= 0) return
         val files = repoDir.listFiles { f -> f.isFile && f.extension == "apk" } ?: return
         val groups = files.groupBy(groupKey)
 
         for ((key, groupFiles) in groups) {
-            val sorted = groupFiles.sortedWith { a, b -> compareVersions(extractVersion(b), extractVersion(a)) }
+            val sorted = groupFiles.sortedWith { a, b -> versionOrder(b, a) }
             if (sorted.size > maxVersions) {
                 sorted.drop(maxVersions).forEach { old ->
                     logger.info("Removing old APK for $key: ${old.name}")
