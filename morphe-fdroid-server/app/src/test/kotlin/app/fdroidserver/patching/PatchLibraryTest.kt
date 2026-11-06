@@ -14,7 +14,7 @@ import java.io.File
  * into `src/test/resources/patching/`), rather than a hand-built stub jar -
  * this is the one file whose shape the `default`/`compatibility`/`name`
  * mapping documented in `PatchLibrary.kt` depends on, so it's worth covering
- * with the real artifact instead of a fake `Patch<*>`.
+ * with the real artifact instead of a fake `Patch`.
  *
  * The concrete values asserted below (patch count, names, options, package
  * versions) were captured by running `PatchLibrary().inspect()` against this

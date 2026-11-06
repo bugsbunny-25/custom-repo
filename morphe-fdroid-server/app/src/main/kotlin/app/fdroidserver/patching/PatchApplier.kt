@@ -1,6 +1,7 @@
 package app.fdroidserver.patching
 
 import app.morphe.engine.PatchEngine
+import app.morphe.engine.PatchEvent
 import app.morphe.engine.patches.PatchBundleLoader
 import app.morphe.patcher.apk.ApkUtils
 import app.morphe.patcher.patch.Patch
@@ -60,7 +61,7 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
     /** Loads every patch out of [patchFile] through the engine's
      * [PatchBundleLoader], which isolates per-bundle load failures and keeps
      * the file each patch came from. */
-    fun loadPatches(patchFile: File): Set<Patch<*>> = PatchBundleLoader.loadFlat(setOf(patchFile))
+    fun loadPatches(patchFile: File): Set<Patch> = PatchBundleLoader.loadFlat(setOf(patchFile))
 
     /**
      * Applies the enabled subset of [patches] to [inputApk], producing a
@@ -93,7 +94,7 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
      */
     fun apply(
         inputApk: File,
-        patches: Set<Patch<*>>,
+        patches: Set<Patch>,
         selection: Map<String, Boolean>,
         optionOverrides: Map<String, Map<String, String>>,
         packageName: String,
@@ -130,7 +131,16 @@ class PatchApplier(private val logger: Logger = LoggerFactory.getLogger(PatchApp
         )
 
         val result = try {
-            runBlocking { PatchEngine.patch(config) { message -> logger.info(message) } }
+            runBlocking {
+                // The engine reports facts rather than progress text now, and
+                // writes every PatchEvent.Log to its own Logger before handing
+                // it over - which LoggingBridge already routes into logback, so
+                // logging them again here would double every line. The step
+                // transitions are what that stream doesn't carry on its own.
+                PatchEngine.patch(config) { event ->
+                    if (event is PatchEvent.StepStarted) logger.info("Step: {}", event.step.name.lowercase())
+                }
+            }
         } catch (e: Exception) {
             // The engine only throws for init errors (e.g. the APK can't be
             // opened at all); every pipeline step failure comes back as a

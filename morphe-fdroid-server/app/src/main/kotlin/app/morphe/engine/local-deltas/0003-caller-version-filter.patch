@@ -1,6 +1,6 @@
 --- a/PatchEngine.kt
 +++ b/PatchEngine.kt
-@@ -114,6 +114,16 @@
+@@ -118,6 +118,16 @@
          val recordHistory: Boolean = true,
          val appDisplayName: String? = null,
          val historyMetadata: HistoryMetadata? = null,
@@ -13,69 +13,69 @@
 +         * unlisted version. Null keeps upstream's check. [forceCompatibility]
 +         * still overrides it.
 +         */
-+        val versionFilter: ((patch: Patch<*>, packageName: String, versionName: String) -> Boolean)? = null,
++        val versionFilter: ((patch: Patch, packageName: String, versionName: String) -> Boolean)? = null,
      ) {
-         companion object {
-             const val DEFAULT_KEYSTORE_ALIAS = "Morphe"
-@@ -408,6 +418,7 @@
+         /** The steps a run with this config goes through, see [PatchEvent.StepStarted]. */
+         val steps: List<PatchStep>
+@@ -465,6 +475,7 @@
                              jsonDisabledPatches = jsonDisabled,
                              exclusive = config.exclusiveMode,
                              force = config.forceCompatibility,
 +                            versionFilter = config.versionFilter,
-                             onProgress = onProgress,
+                             log = ::info,
                          )
  
-@@ -448,6 +459,7 @@
+@@ -505,6 +516,7 @@
                          disabledPatches = config.disabledPatches,
                          exclusiveMode = config.exclusiveMode,
                          forceCompatibility = config.forceCompatibility,
 +                        versionFilter = config.versionFilter,
-                         onProgress = onProgress,
+                         log = ::info,
                      )
                      val jsonOptions = config.optionsFile?.takeIf { it.exists() }?.let { file ->
-@@ -720,6 +732,7 @@
+@@ -765,6 +777,7 @@
          jsonDisabledPatches: Set<String>,
          exclusive: Boolean,
          force: Boolean,
-+        versionFilter: ((Patch<*>, String, String) -> Boolean)?,
-         onProgress: (String) -> Unit,
-     ): Set<Patch<*>> = buildSet {
++        versionFilter: ((Patch, String, String) -> Boolean)?,
+         log: (String) -> Unit,
+     ): Set<Patch> = buildSet {
          val enabledLower = enabledNames.map { it.lowercase() }.toSet()
-@@ -728,7 +741,7 @@
+@@ -773,7 +786,7 @@
          patches.withIndex().forEach patchLoop@{ (i, patch) ->
              val patchName = patch.name ?: return@patchLoop
              val patchNameLower = patchName.lowercase()
--            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, force, onProgress)) {
-+            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, force, versionFilter, onProgress)) {
+-            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, force, log)) {
++            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, force, versionFilter, log)) {
                  return@patchLoop
              }
  
-@@ -765,6 +778,7 @@
+@@ -810,6 +823,7 @@
          disabledPatches: Set<String>,
          exclusiveMode: Boolean,
          forceCompatibility: Boolean,
-+        versionFilter: ((Patch<*>, String, String) -> Boolean)?,
-         onProgress: (String) -> Unit,
-     ): Set<Patch<*>> = buildSet {
++        versionFilter: ((Patch, String, String) -> Boolean)?,
+         log: (String) -> Unit,
+     ): Set<Patch> = buildSet {
          val disabledLower = disabledPatches.map { it.lowercase() }.toSet()
-@@ -774,7 +788,10 @@
+@@ -819,7 +833,10 @@
              val patchName = patch.name ?: return@patchLoop
              val patchNameLower = patchName.lowercase()
  
--            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, forceCompatibility, onProgress)) {
+-            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, forceCompatibility, log)) {
 +            if (!isPatchCompatible(
-+                    patch, patchName, packageName, packageVersion, forceCompatibility, versionFilter, onProgress,
++                    patch, patchName, packageName, packageVersion, forceCompatibility, versionFilter, log,
 +                )
 +            ) {
                  return@patchLoop
              }
  
-@@ -800,11 +817,19 @@
+@@ -845,11 +862,19 @@
          packageName: String,
          packageVersion: String,
          force: Boolean,
-+        versionFilter: ((Patch<*>, String, String) -> Boolean)?,
-         onProgress: (String) -> Unit,
++        versionFilter: ((Patch, String, String) -> Boolean)?,
+         log: (String) -> Unit,
      ): Boolean {
          val supportedVersions = patch.supportedVersionsFor(packageName)
          when {
@@ -83,7 +83,7 @@
 +            // LOCAL DELTA (see README.md): caller-supplied version check.
 +            versionFilter != null -> {
 +                if (!force && !versionFilter(patch, packageName, packageVersion)) {
-+                    onProgress("Skipping \"$patchName\": incompatible with $packageName $packageVersion")
++                    log("Skipping \"$patchName\": incompatible with $packageName $packageVersion")
 +                    return false
 +                }
 +            }

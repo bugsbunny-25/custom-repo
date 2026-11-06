@@ -86,7 +86,7 @@ data class AppVersionSupport(
 
 /** Per-package version support for every package this patch names. Universal
  * compatibility entries (no package name) are left out. */
-fun Patch<*>.appVersionSupport(): Map<String, AppVersionSupport> {
+fun Patch.appVersionSupport(): Map<String, AppVersionSupport> {
     val entries = compatibility.orEmpty().filter { it.packageName != null }
     return entries.groupBy { it.packageName!! }.mapValues { (_, sameName) ->
         val targets = sameName.flatMap { it.targets }
@@ -112,7 +112,7 @@ fun Patch<*>.appVersionSupport(): Map<String, AppVersionSupport> {
  * Handed to the vendored engine as its version filter - see
  * [PatchApplier.apply].
  */
-fun Patch<*>.supportsAppVersion(packageName: String, versionName: String, includeExperimental: Boolean): Boolean {
+fun Patch.supportsAppVersion(packageName: String, versionName: String, includeExperimental: Boolean): Boolean {
     val compat = compatibility
     if (compat.isNullOrEmpty()) return true
     val support = appVersionSupport()[packageName]

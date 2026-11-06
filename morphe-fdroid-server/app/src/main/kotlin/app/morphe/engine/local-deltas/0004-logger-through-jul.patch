@@ -49,7 +49,7 @@
      private class JulBridgeHandler : Handler() {
          override fun publish(record: LogRecord) {
              val rawMessage = record.message ?: return
-@@ -143,10 +151,20 @@
+@@ -142,10 +150,20 @@
              "${level.name}: $message"
          }
  

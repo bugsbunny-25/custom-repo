@@ -20,8 +20,8 @@ import org.junit.jupiter.api.Test
  */
 class PatchSelectorTest {
 
-    private fun fakePatch(name: String, options: Map<String, Option<*>> = emptyMap()): Patch<*> {
-        val patch = mockk<Patch<*>>()
+    private fun fakePatch(name: String, options: Map<String, Option<*>> = emptyMap()): Patch {
+        val patch = mockk<Patch>()
         val optionsMock = mockk<Options>()
         every { optionsMock.containsKey(any<String>()) } answers { options.containsKey(firstArg()) }
         every { optionsMock.get(any<String>()) } answers { options.getValue(firstArg()) }

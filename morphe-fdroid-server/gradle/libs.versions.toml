@@ -21,7 +21,7 @@ slf4j = "2.0.18"
 junit = "6.1.2"
 mockk = "1.14.11"
 # Pinned to the exact version morphe-desktop main currently depends on
-# (confirmed against its gradle/libs.versions.toml at tag v1.15.1, the commit
+# (confirmed against its gradle/libs.versions.toml at tag v2.1.1, the commit
 # recorded in app/src/main/kotlin/app/morphe/engine/FORK_INFO). The vendored
 # `app.morphe.engine` package is compiled against this patcher, so the two move
 # together: bumping one without re-checking the other is how you get
@@ -37,14 +37,14 @@ mockk = "1.14.11"
 # When bumping: re-read morphe-desktop's catalog, then re-check the Patch /
 # Option / PatcherConfig / PackageMetadata API surface the engine and
 # app.fdroidserver.patching call into.
-morphe-patcher = "2.1.0"
+morphe-patcher = "2.3.0"
 # ARSCLib, pinned to the same fork and commit morphe-desktop's own catalog
 # pins. morphe-patcher brings it along at runtime, but only transitively - the
 # vendored engine's apk/ApkInspector.kt reads an APK's AndroidManifest through
 # it directly, so it has to be on the compile classpath too, and at the exact
 # version the patcher was built against. Moved with the engine by
 # scripts/sync-morphe-engine.sh.
-arsclib = "4695b583ef"
+arsclib = "675bed2de3"
 shadow = "9.6.1"
 
 [libraries]
