@@ -24,15 +24,14 @@ import app.morphe.engine.options.writePatchBundles
 import app.morphe.engine.patches.PatchBundleLoader
 import app.morphe.engine.patches.supportedVersionsFor
 import app.morphe.engine.util.FileChecksum
-import app.morphe.engine.util.KeystoreImporter
 import app.morphe.engine.util.Logger
+import app.morphe.engine.util.deleteRecursivelyInParallel
 import app.morphe.engine.util.signWithLegacyFallback
 import app.morphe.engine.workspace.WorkspaceManager
 import app.morphe.patcher.Patcher
 import app.morphe.patcher.PatcherConfig
 import app.morphe.patcher.apk.ApkMerger
 import app.morphe.patcher.apk.ApkUtils
-import app.morphe.patcher.apk.ApkUtils.applyTo
 import app.morphe.patcher.dex.BytecodeMode
 import app.morphe.patcher.dex.NoOpDexVerifier
 import app.morphe.patcher.dex.SdkDexVerifier
@@ -42,8 +41,10 @@ import app.morphe.patcher.patch.setOptions
 import app.morphe.patcher.resource.CpuArchitecture
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.EncodeDefault
@@ -62,8 +63,9 @@ import java.util.logging.Logger as JulLogger
 /** Executes APK modification and patching pipeline. */
 object PatchEngine {
 
+    /** The steps of a run, in the order it goes through them. */
     enum class PatchStep {
-        PATCHING, REBUILDING, SIGNING
+        MERGING_SPLITS, LOADING_PATCHES, READING_APK, PATCHING, REBUILDING, SIGNING
     }
 
     @Serializable
@@ -82,6 +84,7 @@ object PatchEngine {
     data class HistoryMetadata(
         val originalPackageName: String? = null,
         val displayName: String? = null,
+        val appVersion: String? = null,
         val patchSelectionByBundle: Map<String, Set<String>> = emptyMap(),
         val patchOptionValues: Map<String, String> = emptyMap(),
         val sourcesSnapshot: List<PatchedAppRecord.PatchedSourceSnapshot> = emptyList(),
@@ -92,7 +95,7 @@ object PatchEngine {
         val outputApk: File? = null,
         val patchFiles: List<File> = emptyList(),
         val bundleScopes: List<BundleScope> = emptyList(),
-        val patches: Set<Patch<*>> = emptySet(),
+        val patches: Set<Patch> = emptySet(),
         val enabledPatches: Set<String> = emptySet(),
         val disabledPatches: Set<String> = emptySet(),
         val exclusiveMode: Boolean = false,
@@ -100,6 +103,7 @@ object PatchEngine {
         val patchOptions: Map<String, Map<String, Any?>> = emptyMap(),
         val flatPatchOptions: Map<String, String> = emptyMap(),
         val unsigned: Boolean = false,
+        val mount: Boolean = false,
         val signerName: String = DEFAULT_SIGNER_NAME,
         val keystoreDetails: ApkUtils.KeyStoreDetails? = null,
         val architecturesToKeep: Set<CpuArchitecture> = emptySet(),
@@ -114,17 +118,17 @@ object PatchEngine {
         val recordHistory: Boolean = true,
         val appDisplayName: String? = null,
         val historyMetadata: HistoryMetadata? = null,
-        /**
-         * LOCAL DELTA (see README.md): decides whether a patch declared for the
-         * APK's package supports its version name, in place of the check against
-         * [supportedVersionsFor]. That helper drops `AppTarget(version = null)`
-         * ("any version") and ignores `isExperimental`, so a patch declared as
-         * "these versions, plus any other experimentally" was skipped on every
-         * unlisted version. Null keeps upstream's check. [forceCompatibility]
-         * still overrides it.
-         */
-        val versionFilter: ((patch: Patch<*>, packageName: String, versionName: String) -> Boolean)? = null,
     ) {
+        /** The steps a run with this config goes through, see [PatchEvent.StepStarted]. */
+        val steps: List<PatchStep>
+            get() = PatchStep.entries.filter { step ->
+                when (step) {
+                    PatchStep.MERGING_SPLITS -> BundleFormats.isBundle(inputApk)
+                    PatchStep.SIGNING -> !unsigned
+                    else -> true
+                }
+            }
+
         companion object {
             const val DEFAULT_KEYSTORE_ALIAS = "Morphe"
             const val DEFAULT_KEYSTORE_PASSWORD = "Morphe"
@@ -140,6 +144,7 @@ object PatchEngine {
         val outputPath: String,
         val packageName: String,
         val packageVersion: String,
+        @EncodeDefault val isMount: Boolean = false,
         @EncodeDefault val appliedPatches: List<String> = emptyList(),
         @EncodeDefault val failedPatches: List<FailedPatch> = emptyList(),
         @EncodeDefault val stepResults: List<StepResult> = emptyList(),
@@ -151,8 +156,11 @@ object PatchEngine {
     @Serializable
     data class FailedPatch(val name: String, val error: String)
 
-    /** Executes the patching pipeline according to [config], reporting progress via [onProgress]. */
-    suspend fun patch(config: Config, onProgress: (String) -> Unit = {}): Result = withContext(Dispatchers.IO) {
+    /**
+     * Executes the patching pipeline according to [config]. What the run reports goes to [Logger]
+     * and, along with its steps, to [onEvent], from whichever thread reports it.
+     */
+    suspend fun patch(config: Config, onEvent: (PatchEvent) -> Unit = {}): Result = withContext(Dispatchers.IO) {
         require(config.inputApk.exists()) { "Input APK file does not exist: ${config.inputApk.absolutePath}" }
 
         val finalOutputApk = config.outputApk ?: run {
@@ -218,26 +226,30 @@ object PatchEngine {
                 }
             }
 
-            val reportProgress: (String) -> Unit = { message ->
+            fun report(event: PatchEvent) {
                 scopeContext.ensureActive()
-                onProgress(message)
+                if (event is PatchEvent.Log) Logger.log(event.level, event.message)
+                onEvent(event)
             }
 
-            // Capture internal logs from morphe-patcher and pipe to onProgress
+            fun info(message: String) = report(PatchEvent.Log(Logger.Level.INFO, message))
+
+            fun warn(message: String) = report(PatchEvent.Log(Logger.Level.WARN, message))
+
+            // The patcher logs to java.util.logging, which the run reports as its own log for as long as it lasts
             val patcherLogger = JulLogger.getLogger("app.morphe.patcher")
             val prevUseParentHandlers = patcherLogger.useParentHandlers
             patcherLogger.useParentHandlers = false
             val patcherLogHandler = object : Handler() {
                 override fun publish(record: LogRecord) {
-                    scopeContext.ensureActive()
-                    val rawMessage = record.message ?: return
-                    if (rawMessage.isBlank()) return
-                    val prefix = when (record.level) {
-                        Level.SEVERE -> "ERROR: "
-                        Level.WARNING -> "WARNING: "
-                        else -> ""
+                    val message = record.message ?: return
+                    if (message.isBlank()) return
+                    val level = when {
+                        record.level.intValue() >= Level.SEVERE.intValue() -> Logger.Level.ERROR
+                        record.level.intValue() >= Level.WARNING.intValue() -> Logger.Level.WARN
+                        else -> Logger.Level.INFO
                     }
-                    reportProgress("$prefix$rawMessage")
+                    report(PatchEvent.Log(level, message))
                 }
                 override fun flush() {}
                 override fun close() {}
@@ -245,19 +257,47 @@ object PatchEngine {
             patcherLogger.addHandler(patcherLogHandler)
 
             try {
-                val actualInputApk = if (BundleFormats.isBundle(config.inputApk)) {
-                    reportProgress("Merging split APK bundle...")
-                val mergedApk = File(tempDir, "${config.inputApk.nameWithoutExtension}-merged.apk")
-                ApkMerger(JulLogger.getLogger("app.morphe.patcher.ApkMerger").toMorpheLogger()).merge(
-                    inputFile = config.inputApk,
-                    outputFile = mergedApk,
-                    cleanMetaInf = false,
-                )
-                mergedApkToCleanup = mergedApk
-                mergedApk
-            } else {
-                config.inputApk
-            }
+                val actualInputApk = if (PatchStep.MERGING_SPLITS in config.steps) {
+                    report(PatchEvent.StepStarted(PatchStep.MERGING_SPLITS))
+                    info("Merging split APK bundle...")
+                    val mergedApk = File(tempDir, "${config.inputApk.nameWithoutExtension}-merged.apk")
+                    val stagedBundle = if (config.inputApk.parentFile?.canonicalFile == tempDir.canonicalFile) {
+                        config.inputApk
+                    } else {
+                        File(tempDir, config.inputApk.name).also { staged ->
+                            Files.deleteIfExists(staged.toPath())
+                            try {
+                                Files.createSymbolicLink(staged.toPath(), config.inputApk.toPath())
+                            } catch (_: Exception) {
+                                try {
+                                    Files.createLink(staged.toPath(), config.inputApk.toPath())
+                                } catch (_: Exception) {
+                                    config.inputApk.copyTo(staged, overwrite = true)
+                                }
+                            }
+                        }
+                    }
+
+                    try {
+                        ApkMerger(JulLogger.getLogger("app.morphe.patcher.ApkMerger").toMorpheLogger()).merge(
+                            inputFile = stagedBundle,
+                            outputFile = mergedApk,
+                            cleanMetaInf = false,
+                        )
+                    } finally {
+                        if (stagedBundle != config.inputApk) {
+                            runCatching { Files.deleteIfExists(stagedBundle.toPath()) }
+                        }
+                        tempDir.listFiles()?.filter { it.name.startsWith("tmp_") }?.forEach {
+                            it.deleteRecursivelyInParallel()
+                        }
+                        cleanupLegacyBundleTmp(config.inputApk)
+                    }
+                    mergedApkToCleanup = mergedApk
+                    mergedApk
+                } else {
+                    config.inputApk
+                }
 
             currentCoroutineContext().ensureActive()
 
@@ -276,9 +316,14 @@ object PatchEngine {
                 fileWorkspacePath = File(tempDir, "workspace").also { it.mkdirs() },
                 verifier = verifier,
                 validate = config.validate,
+                // Reported from the threads of the patcher, where a canceled run must not throw
+                progress = { task, done, total ->
+                    if (scopeContext.isActive) onEvent(PatchEvent.TaskProgress(task, done, total))
+                },
             )
 
-            onProgress("Initializing patcher...")
+            report(PatchEvent.StepStarted(PatchStep.LOADING_PATCHES))
+            info("Initializing patcher...")
             Patcher(patcherConfig).use { patcher ->
                 val packageName = patcher.context.packageMetadata.packageName
                 val packageVersion = patcher.context.packageMetadata.versionName
@@ -290,6 +335,7 @@ object PatchEngine {
                     outputPath = finalOutputApk.absolutePath,
                     packageName = packageName,
                     packageVersion = packageVersion,
+                    isMount = config.mount,
                     appliedPatches = appliedPatches,
                     failedPatches = failedPatches,
                     stepResults = stepResults,
@@ -297,7 +343,7 @@ object PatchEngine {
                     failureDetail = detail,
                 )
 
-                val finalPatches = mutableSetOf<Patch<*>>()
+                val finalPatches = mutableSetOf<Patch>()
 
                 val effectiveBundleScopes = if (config.bundleScopes.isNotEmpty()) {
                     config.bundleScopes
@@ -308,7 +354,7 @@ object PatchEngine {
                 }
 
                 if (effectiveBundleScopes.isNotEmpty()) {
-                    onProgress("Loading patches from ${effectiveBundleScopes.size} bundle(s)...")
+                    info("Loading patches from ${effectiveBundleScopes.size} bundle(s)...")
                     val loadedBundles = PatchBundleLoader.loadEach(effectiveBundleScopes.map { it.bundleFile })
                     val patchSnapshots = loadedBundles.map { lb ->
                         lb.patches.toPatchBundle(sourceFiles = setOf(lb.sourceFile))
@@ -317,13 +363,13 @@ object PatchEngine {
 
                     val patchOptionsByFile: Map<File, PatchBundle?> = config.optionsFile?.let { file ->
                         if (file.exists()) {
-                            onProgress("Reading options from ${file.path}")
+                            info("Reading options from ${file.path}")
                             val jsonBundles = readPatchBundles(file)
                             loadedBundles.associate { lb ->
                                 lb.sourceFile to jsonBundles.findMatchingBundle(setOf(lb.sourceFile))
                             }
                         } else {
-                            onProgress("Options file ${file.path} does not exist, generating with defaults")
+                            info("Options file ${file.path} does not exist, generating with defaults")
                             writePatchBundles(file, patchSnapshots)
                             loadedBundles.zip(patchSnapshots).associate { (lb, b) ->
                                 lb.sourceFile to b
@@ -341,22 +387,22 @@ object PatchEngine {
                                 packageName = packageName,
                             )
                             if (drift.hasDrift) {
-                                Logger.warn("Options file is out of date for ${lb.sourceFile.name}")
+                                warn("Options file is out of date for ${lb.sourceFile.name}")
                                 if (drift.oldPatches.isNotEmpty()) {
-                                    Logger.warn("  ${drift.oldPatches.size} patches in your options file are not compatible with the app:")
-                                    drift.oldPatches.forEach { Logger.warn("    - $it") }
+                                    warn("  ${drift.oldPatches.size} patches in your options file are not compatible with the app:")
+                                    drift.oldPatches.forEach { warn("    - $it") }
                                 }
                                 if (drift.patchesWithNewOptions.isNotEmpty()) {
                                     drift.patchesWithNewOptions.forEach { (patch, key) ->
-                                        Logger.warn(" \"$patch\" has new options: ${key.joinToString(", ")}")
+                                        warn(" \"$patch\" has new options: ${key.joinToString(", ")}")
                                     }
                                 }
                                 if (drift.patchesWithOldOptions.isNotEmpty()) {
                                     drift.patchesWithOldOptions.forEach { (patch, key) ->
-                                        Logger.warn(" \"$patch\" has old options: ${key.joinToString(", ")} that were removed.")
+                                        warn(" \"$patch\" has old options: ${key.joinToString(", ")} that were removed.")
                                     }
                                 }
-                                Logger.warn("  Use --options-update parameter to sync, or use 'options-create' command to regenerate.")
+                                warn("  Use --options-update parameter to sync, or use 'options-create' command to regenerate.")
                             }
                         }
                     }
@@ -370,7 +416,7 @@ object PatchEngine {
                     val jsonOptionsByFile = loadedBundles.associate { lb ->
                         val bundle = patchOptionsByFile[lb.sourceFile]
                         val opts = bundle?.deserializeOptionsFor(lb.patches) { patchName, key, e ->
-                            Logger.warn("Failed to deserialize option $key for $patchName in ${lb.sourceFile.name}: ${e.message ?: e::class.simpleName}")
+                            warn("Failed to deserialize option $key for $patchName in ${lb.sourceFile.name}: ${e.message ?: e::class.simpleName}")
                         } ?: emptyMap()
                         lb.sourceFile to opts
                     }
@@ -384,7 +430,7 @@ object PatchEngine {
                         )
                     } else emptyMap()
 
-                    onProgress("Filtering patches for $packageName v$packageVersion...")
+                    info("Filtering patches for $packageName v$packageVersion...")
                     loadedBundles.forEachIndexed { i, lb ->
                         val scope = effectiveBundleScopes[i]
                         val jsonEnabled = jsonEnabledByFile[lb.sourceFile] ?: emptySet()
@@ -418,8 +464,7 @@ object PatchEngine {
                             jsonDisabledPatches = jsonDisabled,
                             exclusive = config.exclusiveMode,
                             force = config.forceCompatibility,
-                            versionFilter = config.versionFilter,
-                            onProgress = onProgress,
+                            log = ::info,
                         )
 
                         // Merge options across JSON, flat, and bundle scopes.
@@ -442,12 +487,12 @@ object PatchEngine {
                         finalPatches += filtered
                     }
                 } else {
-                    onProgress("Filtering patches for $packageName v$packageVersion...")
+                    info("Filtering patches for $packageName v$packageVersion...")
                     if (config.patches.isNotEmpty()) {
                         val flatSnapshot = config.patches.toPatchBundle(sourceFiles = emptySet())
                         patchesSnapshotForFinally = listOf(flatSnapshot)
                         if (config.optionsFile != null && !config.optionsFile.exists()) {
-                            onProgress("Options file ${config.optionsFile.path} does not exist, generating with defaults")
+                            info("Options file ${config.optionsFile.path} does not exist, generating with defaults")
                             writePatchBundles(config.optionsFile, patchesSnapshotForFinally)
                         }
                     }
@@ -459,14 +504,13 @@ object PatchEngine {
                         disabledPatches = config.disabledPatches,
                         exclusiveMode = config.exclusiveMode,
                         forceCompatibility = config.forceCompatibility,
-                        versionFilter = config.versionFilter,
-                        onProgress = onProgress,
+                        log = ::info,
                     )
                     val jsonOptions = config.optionsFile?.takeIf { it.exists() }?.let { file ->
-                        onProgress("Reading options from ${file.path}")
+                        info("Reading options from ${file.path}")
                         val jsonBundles = readPatchBundles(file)
                         jsonBundles.firstOrNull()?.deserializeOptionsFor(config.patches) { patchName, key, e ->
-                            Logger.warn("Failed to deserialize option $key for $patchName: ${e.message ?: e::class.simpleName}")
+                            warn("Failed to deserialize option $key for $patchName: ${e.message ?: e::class.simpleName}")
                         } ?: emptyMap()
                     } ?: emptyMap()
 
@@ -497,27 +541,41 @@ object PatchEngine {
                 patcher += finalPatches
                 currentCoroutineContext().ensureActive()
 
-                // 4. Execute patches
-                onProgress("Applying ${finalPatches.size} patches...")
+                // 4. Execute patches. The patcher reads the APK first, which ends once the first patch runs
+                report(PatchEvent.StepStarted(PatchStep.READING_APK))
+                info("Applying ${finalPatches.size} patches...")
                 try {
-                    patcher().collect { patchResult ->
-                        currentCoroutineContext().ensureActive()
-                        val patchName = patchResult.patch.name ?: "Unknown"
-                        patchResult.exception?.let { exception ->
-                            val error = StringWriter().use { writer ->
-                                exception.printStackTrace(PrintWriter(writer))
-                                writer.toString()
+                    coroutineScope {
+                        val runningPatch = RunningPatchWatch(this, ::warn)
+                        var patching = false
+                        patcher { patch ->
+                            if (!patching) {
+                                patching = true
+                                report(PatchEvent.StepStarted(PatchStep.PATCHING))
                             }
-                            onProgress("FAILED: $patchName")
-                            failedPatches.add(FailedPatch(patchName, error))
+                            runningPatch.started(patch.toString())
+                        }.collect { patchResult ->
+                            currentCoroutineContext().ensureActive()
+                            val patchName = patchResult.patch.toString()
+                            patchResult.exception?.let { exception ->
+                                val error = StringWriter().use { writer ->
+                                    exception.printStackTrace(PrintWriter(writer))
+                                    writer.toString()
+                                }
+                                report(PatchEvent.Log(Logger.Level.ERROR, "Failed: $patchName"))
+                                failedPatches.add(FailedPatch(patchName, error))
 
-                            if (config.failOnError) {
-                                throw PatchFailedException("Patch \"$patchName\" failed: ${exception.message}", exception)
+                                if (config.failOnError) {
+                                    throw PatchFailedException("Patch \"$patchName\" failed: ${exception.message}", exception)
+                                }
+                            } ?: run {
+                                info("Applied: $patchName")
+                                report(PatchEvent.PatchApplied(patchName))
+                                appliedPatches.add(patchName)
                             }
-                        } ?: run {
-                            onProgress("Applied: $patchName")
-                            appliedPatches.add(patchName)
                         }
+                        // A failure cancels the reports with the scope, but the scope waits for them otherwise
+                        runningPatch.stopped()
                     }
                     stepResults.add(StepResult(PatchStep.PATCHING, failedPatches.isEmpty()))
                 } catch (e: PatchFailedException) {
@@ -532,10 +590,10 @@ object PatchEngine {
 
                 val rebuiltApk = File(tempDir, "rebuilt.apk")
                 try {
-                    onProgress("Rebuilding APK...")
-                    val patcherResult = patcher.get()
-                    Files.copy(actualInputApk.toPath(), rebuiltApk.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    patcherResult.applyTo(rebuiltApk)
+                    report(PatchEvent.StepStarted(PatchStep.REBUILDING))
+                    info("Rebuilding APK...")
+                    // Compiles the patched files and writes the unsigned APK in one pass
+                    patcher.writeApk(rebuiltApk)
                     stepResults.add(StepResult(PatchStep.REBUILDING, true))
                 } catch (e: CancellationException) {
                     throw e
@@ -547,8 +605,8 @@ object PatchEngine {
 
                 currentCoroutineContext().ensureActive()
 
-                val tempOutput = File(tempDir, finalOutputApk.name)
-                if (!config.unsigned) {
+                if (PatchStep.SIGNING in config.steps) {
+                    report(PatchEvent.StepStarted(PatchStep.SIGNING))
                     val rawKeystore = config.keystoreDetails ?: ApkUtils.KeyStoreDetails(
                         MorpheData.defaultKeystoreFile,
                         null,
@@ -562,46 +620,20 @@ object PatchEngine {
                         return@withContext earlyResult("Signing failed: $msg", msg)
                     }
 
-                    val resolvedKeystoreFile = if (rawKeystore.keyStore.exists()) {
-                        val importResult = KeystoreImporter.ensureBks(
-                            source = rawKeystore.keyStore,
-                            convertedOutput = MorpheData.importedKeystoreFile,
-                            alias = rawKeystore.alias,
-                            password = rawKeystore.password,
-                        )
-                        when (importResult) {
-                            is KeystoreImporter.Result.AlreadyBks -> importResult.file
-                            is KeystoreImporter.Result.Converted -> {
-                                Logger.info("Converted ${importResult.sourceFormat.displayName} keystore → BKS: ${importResult.file.absolutePath}")
-                                importResult.file
-                            }
-                            is KeystoreImporter.Result.Failed -> {
-                                val msg = "Keystore conversion failed: ${importResult.reason}"
-                                stepResults.add(StepResult(PatchStep.SIGNING, false, msg))
-                                return@withContext earlyResult("Signing failed: $msg", msg)
-                            }
-                        }
-                    } else {
-                        rawKeystore.keyStore
-                    }
-
-                    val finalKeystoreDetails = ApkUtils.KeyStoreDetails(
-                        resolvedKeystoreFile,
-                        rawKeystore.keyStorePassword,
-                        rawKeystore.alias,
-                        rawKeystore.password,
-                    )
-
                     try {
+                        // The patcher reads PKCS12, BKS and JKS keystores as they are.
+                        // The APK is signed in place: a failed attempt, such as one with the wrong
+                        // keystore password, throws before the file is modified, so the legacy retry
+                        // signs the same unsigned APK.
                         signWithLegacyFallback(
-                            primary = finalKeystoreDetails,
+                            primary = rawKeystore,
                             allowLegacyFallback = config.keystoreDetails == null ||
-                                (finalKeystoreDetails.alias == Config.DEFAULT_KEYSTORE_ALIAS &&
-                                 finalKeystoreDetails.password == Config.DEFAULT_KEYSTORE_PASSWORD),
+                                (rawKeystore.alias == Config.DEFAULT_KEYSTORE_ALIAS &&
+                                 rawKeystore.password == Config.DEFAULT_KEYSTORE_PASSWORD),
                         ) { details ->
                             ApkUtils.signApk(
                                 rebuiltApk,
-                                tempOutput,
+                                rebuiltApk,
                                 config.signerName,
                                 details,
                             )
@@ -614,26 +646,25 @@ object PatchEngine {
                         val sw = StringWriter().also { e.printStackTrace(PrintWriter(it)) }.toString()
                         return@withContext earlyResult("Signing failed: ${e.message}", sw)
                     }
-                } else {
-                    Files.copy(rebuiltApk.toPath(), tempOutput.toPath(), StandardCopyOption.REPLACE_EXISTING)
                 }
 
                 currentCoroutineContext().ensureActive()
 
                 if (config.sdkToolsPath != null) {
                     try {
-                        onProgress("Verifying APK with Android SDK...")
-                        verifier.verifyApkFile(tempOutput)
+                        info("Verifying APK with Android SDK...")
+                        verifier.verifyApkFile(rebuiltApk)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        Logger.warn("SDK DEX Verification warning: ${e.message}")
+                        warn("SDK DEX Verification warning: ${e.message}")
                     }
                 }
 
                 finalOutputApk.parentFile?.mkdirs()
-                Files.copy(tempOutput.toPath(), finalOutputApk.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                onProgress("Saved to ${finalOutputApk.absolutePath}")
+                // A move is a rename on the same drive and falls back to copy and delete across drives
+                Files.move(rebuiltApk.toPath(), finalOutputApk.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                info("Saved to ${finalOutputApk.absolutePath}")
 
                 val isSuccess = !config.failOnError || failedPatches.isEmpty()
 
@@ -665,7 +696,7 @@ object PatchEngine {
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        Logger.warn("Failed to record patched app to store: ${e.message ?: e::class.simpleName}")
+                        warn("Failed to record patched app to store: ${e.message ?: e::class.simpleName}")
                     }
                 }
 
@@ -692,6 +723,7 @@ object PatchEngine {
                     outputPath = finalOutputApk.absolutePath,
                     packageName = packageName,
                     packageVersion = packageVersion,
+                    isMount = config.mount,
                     appliedPatches = appliedPatches,
                     failedPatches = failedPatches,
                     stepResults = stepResults,
@@ -721,7 +753,7 @@ object PatchEngine {
     }
 
     private fun filterBundlePatches(
-        patches: Set<Patch<*>>,
+        patches: Set<Patch>,
         packageName: String,
         packageVersion: String,
         enabledNames: Set<String>,
@@ -732,29 +764,28 @@ object PatchEngine {
         jsonDisabledPatches: Set<String>,
         exclusive: Boolean,
         force: Boolean,
-        versionFilter: ((Patch<*>, String, String) -> Boolean)?,
-        onProgress: (String) -> Unit,
-    ): Set<Patch<*>> = buildSet {
+        log: (String) -> Unit,
+    ): Set<Patch> = buildSet {
         val enabledLower = enabledNames.map { it.lowercase() }.toSet()
         val disabledLower = disabledNames.map { it.lowercase() }.toSet()
 
         patches.withIndex().forEach patchLoop@{ (i, patch) ->
             val patchName = patch.name ?: return@patchLoop
             val patchNameLower = patchName.lowercase()
-            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, force, versionFilter, onProgress)) {
+            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, force, log)) {
                 return@patchLoop
             }
 
             val isCliDisabled = patchNameLower in disabledLower || i in disabledIndices
             if (isCliDisabled) {
-                onProgress("Skipping disabled: $patchName")
+                log("Skipping disabled: $patchName")
                 return@patchLoop
             }
 
             val isCliEnabled = patchNameLower in enabledLower || i in enabledIndices
             val isJsonDisabled = !isCliEnabled && patchNameLower in jsonDisabledPatches
             if (isJsonDisabled) {
-                onProgress("Skipping disabled: $patchName (from options file)")
+                log("Skipping disabled: $patchName (from options file)")
                 return@patchLoop
             }
 
@@ -762,7 +793,7 @@ object PatchEngine {
             val isEnabled = !exclusive && patch.default
 
             if (!(isEnabled || isCliEnabled || isJsonEnabled)) {
-                onProgress("Skipping disabled: $patchName (default)")
+                log("Skipping disabled: $patchName (default)")
                 return@patchLoop
             }
 
@@ -771,16 +802,15 @@ object PatchEngine {
     }
 
     private fun filterPatches(
-        patches: Set<Patch<*>>,
+        patches: Set<Patch>,
         packageName: String,
         packageVersion: String,
         enabledPatches: Set<String>,
         disabledPatches: Set<String>,
         exclusiveMode: Boolean,
         forceCompatibility: Boolean,
-        versionFilter: ((Patch<*>, String, String) -> Boolean)?,
-        onProgress: (String) -> Unit,
-    ): Set<Patch<*>> = buildSet {
+        log: (String) -> Unit,
+    ): Set<Patch> = buildSet {
         val disabledLower = disabledPatches.map { it.lowercase() }.toSet()
         val enabledLower = enabledPatches.map { it.lowercase() }.toSet()
 
@@ -788,15 +818,12 @@ object PatchEngine {
             val patchName = patch.name ?: return@patchLoop
             val patchNameLower = patchName.lowercase()
 
-            if (!isPatchCompatible(
-                    patch, patchName, packageName, packageVersion, forceCompatibility, versionFilter, onProgress,
-                )
-            ) {
+            if (!isPatchCompatible(patch, patchName, packageName, packageVersion, forceCompatibility, log)) {
                 return@patchLoop
             }
 
             if (patchNameLower in disabledLower) {
-                onProgress("Skipping disabled: $patchName")
+                log("Skipping disabled: $patchName")
                 return@patchLoop
             }
 
@@ -812,33 +839,36 @@ object PatchEngine {
     }
 
     private fun isPatchCompatible(
-        patch: Patch<*>,
+        patch: Patch,
         patchName: String,
         packageName: String,
         packageVersion: String,
         force: Boolean,
-        versionFilter: ((Patch<*>, String, String) -> Boolean)?,
-        onProgress: (String) -> Unit,
+        log: (String) -> Unit,
     ): Boolean {
         val supportedVersions = patch.supportedVersionsFor(packageName)
         when {
             supportedVersions != null && supportedVersions.isEmpty() -> return false
-            // LOCAL DELTA (see README.md): caller-supplied version check.
-            versionFilter != null -> {
-                if (!force && !versionFilter(patch, packageName, packageVersion)) {
-                    onProgress("Skipping \"$patchName\": incompatible with $packageName $packageVersion")
-                    return false
-                }
-            }
             supportedVersions != null -> {
                 val matchesVersion = force || packageVersion in supportedVersions
                 if (!matchesVersion) {
-                    onProgress("Skipping \"$patchName\": incompatible with $packageName $packageVersion")
+                    log("Skipping \"$patchName\": incompatible with $packageName $packageVersion")
                     return false
                 }
             }
         }
         return true
+    }
+
+    private fun cleanupLegacyBundleTmp(inputApk: File) {
+        runCatching {
+            val parent = inputApk.parentFile ?: return
+            val hex8 = "%08x".format(inputApk.name.hashCode())
+            val prefix = "tmp_$hex8"
+            parent.listFiles()?.filter { file ->
+                file.isDirectory && file.name.startsWith(prefix, ignoreCase = true)
+            }?.forEach { it.deleteRecursivelyInParallel() }
+        }
     }
 
     private class PatchFailedException(message: String, cause: Throwable) : Exception(message, cause)
