@@ -28,7 +28,9 @@ remote sources and patch an APK:
 | File | Role |
 | --- | --- |
 | `PatchEngine.kt` | the patching pipeline: merge bundle → filter patches → apply → rebuild → sign |
-| `patches/PatchExtensions.kt` | `Patch<*>` compatibility/version helpers the pipeline filters on |
+| `PatchEvent.kt` | what a run reports as it goes (`Log`, `StepStarted`, `PatchApplied`, `TaskProgress`) - the `onEvent` callback `PatchApplier` passes in |
+| `RunningPatchWatch.kt` | names the patch a run is stuck on once it runs unusually long, since the patcher reports a patch only after it ends |
+| `patches/PatchExtensions.kt` | `Patch` compatibility/version helpers the pipeline filters on |
 | `PatcherCompatibility.kt` | reads a `.mpp`'s `Patcher-Version` manifest attribute and compares it with the patcher we ship |
 | `MorpheComponents.kt` | the morphe-patcher version actually on the classpath |
 | `MultiSourceLoader.kt` | loads several `.mpp` bundles in parallel, isolating per-bundle load failures |
@@ -47,10 +49,10 @@ remote sources and patch an APK:
 | `util/Logger.kt` | the engine's own logger - every vendored file logs through it, and `LoggingBridge` routes it into logback |
 | `UpdateChecker.kt` | the desktop app's update check, vendored only because `util/Logger.kt` reports its version |
 | `util/KeystoreSigner.kt` | signing with the legacy-alias fallback |
-| `util/KeystoreImporter.kt`, `util/KeystoreConversionUtils.kt`, `util/JksKeyStoreParser.kt` | the JKS → BKS conversion the signing step falls back to |
 | `util/FileChecksum.kt` | SHA-256 + size fingerprint of the patched APK |
 | `util/VersionUtils.kt` | `String.normalizeVersion()` and version comparison - where upstream moved `Release.getVersion()` |
 | `util/ParallelDelete.kt` | `File.deleteRecursivelyInParallel()`, used to clear the patching temp dir |
+| `util/AndroidSdkLocator.kt` | `ANDROID_HOME`/`ANDROID_SDK_ROOT` lookup `config/EngineConfig.kt` resolves `verifyWithSdk` through; this server leaves `Config.sdkToolsPath` null, so no SDK is looked for |
 
 The list grew a lot at v1.20.0. Upstream pulled machinery that used to live in the
 desktop app *into* the engine package - APK inspection, the options file, the
@@ -61,6 +63,26 @@ patching those calls back out of a pipeline we want to stay a plain `diff`
 against upstream. `MorpheData` resolves a writable directory on its own
 (`MORPHE_DATA_DIR`, else next to the shadow jar), so nothing here needs a
 desktop install to exist.
+
+Three things changed shape at v2.0.0/v2.1.x, all of them visible in
+`app.fdroidserver.patching`:
+
+- **`Patch` is no longer generic.** morphe-patcher 2.3.0 dropped the type
+  parameter, so every `Patch<*>` became `Patch` - here and in
+  `AppVersionSupport.kt`, `PatchApplier.kt`, `PatchLibrary.kt` and
+  `PatchSelector.kt`.
+- **A run reports events, not progress strings.** `PatchEngine.patch` takes
+  `onEvent: (PatchEvent) -> Unit` in place of `onProgress: (String) -> Unit`,
+  and writes every `PatchEvent.Log` to `util/Logger.kt` itself before handing
+  it over. Since local delta 2 routes that logger into logback, `PatchApplier`
+  no longer logs those messages a second time; it logs the step transitions,
+  which that stream doesn't carry on its own.
+- **The JKS → BKS conversion is gone.** The patcher now reads PKCS12, BKS and
+  JKS keystores as they are, so upstream deleted `util/KeystoreImporter.kt`,
+  `util/KeystoreConversionUtils.kt` and `util/JksKeyStoreParser.kt` and signs
+  with whatever `Config.keystoreDetails` points at. This server's
+  `patched-keystore.jks` is read directly now rather than being converted to
+  BKS under the engine's data directory first.
 
 `apk/ApkInspector.kt` reads manifests through ARSCLib directly, which is why
 `app/build.gradle.kts` depends on it explicitly: morphe-patcher brings it along
@@ -80,7 +102,7 @@ download URLs, and keeps its own catalog in SQLite.
 
 ## Local deltas from upstream
 
-Kept as small as possible so re-syncing stays cheap. Two, as of v1.20.0:
+Kept as small as possible so re-syncing stays cheap. Two, as of v2.1.1:
 
 1. **`PatchEngine.kt` - caller-supplied version filter.** `Config.versionFilter`
    (null by default, which keeps upstream's check) replaces the

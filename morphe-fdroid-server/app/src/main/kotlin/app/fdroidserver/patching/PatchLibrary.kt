@@ -96,7 +96,7 @@ class PatchLibrary {
 
     fun inspect(mppFile: File): List<PatchInfo> = inspect(setOf(mppFile))
 
-    private fun Patch<*>.toPatchInfo(): PatchInfo {
+    private fun Patch.toPatchInfo(): PatchInfo {
         return PatchInfo(
             name = name,
             description = description,

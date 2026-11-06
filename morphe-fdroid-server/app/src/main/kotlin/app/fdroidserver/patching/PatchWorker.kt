@@ -21,7 +21,7 @@ private val json = Json { ignoreUnknownKeys = true }
  * needed to go from a version page URL all the way to a signed, patched APK:
  * resolving + downloading the APK, merging it if it's a split bundle, and
  * running [PatchApplier]. [patchSelection]/[optionOverrides] stand in for an
- * already-loaded `Set<Patch<*>>` (not JSON-serializable) - the worker loads
+ * already-loaded `Set<Patch>` (not JSON-serializable) - the worker loads
  * the bundle itself from [patchFile] and hands both maps to [PatchApplier],
  * which turns them into the vendored engine's enabled/disabled name sets and
  * typed option map (see [PatchSelector]).

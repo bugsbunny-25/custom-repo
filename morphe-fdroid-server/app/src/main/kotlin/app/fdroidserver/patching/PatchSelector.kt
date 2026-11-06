@@ -44,7 +44,7 @@ object PatchSelector {
      * by an `.mpp` update can't look like a real option.
      */
     fun convertOptions(
-        patches: Set<Patch<*>>,
+        patches: Set<Patch>,
         optionOverrides: Map<String, Map<String, String>>,
     ): Map<String, Map<String, Any?>> {
         if (optionOverrides.isEmpty()) return emptyMap()
