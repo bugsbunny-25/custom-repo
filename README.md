@@ -61,16 +61,30 @@ docker-compose logs -f
 (CI builds via `.github/workflows/docker-publish.yml` use the workflow's own
 `secrets.GITHUB_TOKEN`/`github.actor` automatically — no setup needed there.)
 
-If you're using Apple's `container` CLI instead of Docker, use
-`local.Dockerfile` instead — its builder doesn't support BuildKit secret
-mounts, so the token is passed as a plain build arg there:
+Apple's `container` CLI works with the same command — its builder supports
+`--mount=type=secret` as of 1.7, so the separate `local.Dockerfile` that used
+to exist for it (passing the token as a plain build arg) is gone:
 
 ```bash
 container build \
+  --secret id=github_token,env=GITHUB_TOKEN \
   --build-arg GITHUB_ACTOR=<your-github-username> \
-  --build-arg GITHUB_TOKEN=<your-github-token> \
-  -t custom-repo -f local.Dockerfile .
+  -t custom-repo .
 ```
+
+To check a built image before shipping it:
+
+```bash
+./scripts/smoke-test.sh custom-repo
+```
+
+That verifies the things that break silently — that `jar`, `jarsigner`,
+`keytool` and `apksigner` are all present, that `fdroid init` and
+`fdroid update` actually produce and sign all three index formats, and that
+the keystores are *not* reachable over HTTP. Pass
+`--data /path/to/a/copy/of/srv/fdroid` to also assert the regenerated index
+is signed by the same key as the one already there. CI runs it on every pull
+request.
 
 The repository will be available at `http://localhost:8080`
 
@@ -354,60 +368,68 @@ that is an explicit request for that version.
 
 ## Memory and resource limits
 
-The container ships with **no JVM resource flags and no `mem_limit`**. Both JVMs
-size themselves the way the JVM normally does. This section explains what that
-costs, how to put a bound back, and what breaks if you set it too low - all
-numbers below are measured, not estimated (see *Measurements* for the setup).
+Both JVMs are now **explicitly capped** (they used to run with no resource
+flags at all), and the always-on process no longer has to be big enough for a
+patch run. All numbers below are measured, not estimated.
 
-### Where the memory actually goes
-
-There are two JVMs with completely different profiles:
+### Two JVMs, two very different jobs
 
 | | admin server | patch worker |
 | --- | --- | --- |
 | lifetime | the container's | one patch job (~2-3 min) |
 | work | admin UI, schedulers, DB, HTML scraping | download, bundle merge, decompile/patch/rebuild/sign |
-| measured RSS | **~300 MiB, flat** | **up to ~1.76 GiB** |
+| heap cap | `-Xmx256m` (`SERVER_JVM_XMX`) | `-Xmx1536m` (`PATCH_WORKER_XMX`) |
+| measured | **~151 MiB anon, flat** | **up to ~1.76 GiB RSS** |
 
-This split is deliberate (see `PatchWorker.kt`): the memory-spiky work runs in a
+The split is deliberate (see `PatchWorker.kt`): the memory-spiky work runs in a
 short-lived child JVM, so its peak is returned to the OS the moment the job
 ends instead of sitting in the long-running process for the container's life.
 
-It also means the JVM flags that used to be here - `-Xmx512m -Xms64m
--XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -Dio.netty.allocator.type=unpooled
--XX:MaxDirectMemorySize=64m`, plus `MALLOC_ARENA_MAX=2` - only ever constrained
-the **admin server's idle footprint**. They never bounded a patch run, which is
-where essentially all the memory goes.
+The caps are applied as **command-line flags** in `docker-entrypoint.sh`, not
+via `JAVA_TOOL_OPTIONS` or the environment. That is not a style preference: the
+worker is spawned with `ProcessBuilder` and inherits the environment, so an
+environment-level `-Xmx` would clamp patch runs to the server's tiny heap and
+break them. Flags on the command line are the only way the two can differ.
 
-### The trap: a container limit is roughly 4x the usable heap
+Measured idle for the always-on container, 45 s after start, read from its own
+cgroup:
+
+| | |
+| --- | --- |
+| `anon` (real working set) | **151 MiB** |
+| `file` (page cache, reclaimable) | 135 MiB |
+| `memory.current` (both) | 290 MiB |
+
+That is down from **~510 MiB** before this change (the admin JVM alone was
+~497 MiB RSS). Most of the saving is `-Xmx256m` plus `-XX:MaxMetaspaceSize`
+and `-Xss`, which were previously unbounded, plus dropping supervisord.
+
+### The trap this used to have, and why it is mostly gone
 
 With no `-Xmx`, a JVM sets its max heap to **25% of the memory it can see**
 (`MaxRAMPercentage` defaults to 25), and in a container that is the cgroup
-limit. So `mem_limit: 1g` does not give the patcher 1 GiB - it gives it a
-**256 MiB heap**, and the run dies of `OutOfMemoryError` while the container
-still has ~140 MiB free. Measured: at a 1 GiB limit the cgroup peaked at
-860 MiB and the patch still failed.
+limit. So `mem_limit: 1g` did not give the patcher 1 GiB - it gave it a
+**256 MiB heap**, and the run died of `OutOfMemoryError` while the container
+still had ~140 MiB free.
 
-Raising the fraction doesn't rescue an undersized container, it just moves the
-failure: at a 1.5 GiB limit with `-XX:MaxRAMPercentage=55` (887 MiB heap) the
-JVM survived longer, the container hit its ceiling instead, and the kernel
-OOM-killed the worker.
+Now that both heaps are set explicitly, the container limit no longer doubles
+as the heap setting. It still has to be **larger than the worker's resident
+peak**, which is the number that matters:
 
 ### Measurements
 
 YouTube 21.36.45 (~150 MiB input, 217 MiB signed output), 81 patches applied,
-`morphe-patches` v1.42.0, arm64, 4 CPUs. Sampled every 2s.
+`morphe-patches` v1.42.0, arm64, 4 CPUs. Sampled every 2s. These were taken
+with no `-Xmx` on the worker, which is why the heap column varies - they are
+still the authoritative figures for how much a YouTube-class run costs.
 
-| `mem_limit` | `MaxRAMPercentage` | worker max heap | result | cgroup peak | worker RSS peak |
-| --- | --- | --- | --- | --- | --- |
-| none / 4 GiB | 25% (default) | 1024 MiB | works | 3325 MiB | 1759 MiB |
-| 2 GiB | 25% (default) | 512 MiB | works | 1942 MiB | 1030 MiB |
-| 1.5 GiB | 25% (default) | 384 MiB | **fails** - JVM heap OOM (exit 1) | 1490 MiB | 1239 MiB |
-| 1 GiB | 25% (default) | 256 MiB | **fails** - JVM heap OOM (exit 1) | 860 MiB | - |
-| 1.5 GiB | 55% | 887 MiB | **fails** - kernel OOM kill (exit 137) | 1536 MiB (= limit) | - |
-
-Idle, with the repo initialized and a 9.4 MiB `.mpp` imported: admin server
-~300 MiB RSS, whole container ~690 MiB.
+| `mem_limit` | worker max heap | result | cgroup peak | worker RSS peak |
+| --- | --- | --- | --- | --- |
+| none / 4 GiB | 1024 MiB | works | 3325 MiB | 1759 MiB |
+| 2 GiB | 512 MiB | works | 1942 MiB | 1030 MiB |
+| 1.5 GiB | 384 MiB | **fails** - JVM heap OOM (exit 1) | 1490 MiB | 1239 MiB |
+| 1 GiB | 256 MiB | **fails** - JVM heap OOM (exit 1) | 860 MiB | - |
+| 1.5 GiB | 887 MiB (55%) | **fails** - kernel OOM kill (exit 137) | 1536 MiB (= limit) | - |
 
 Two things to read carefully:
 
@@ -421,55 +443,124 @@ Two things to read carefully:
 
 ### Recommendations
 
-- **Leave it unbounded** (the default) unless idle RAM on a big host actually
-  bothers you. The admin server's *resident* footprint stays ~300 MiB no matter
-  how large its max heap is - the max is a ceiling, not a reservation.
-- **If you want one number:** `mem_limit: 3g` in `docker-compose.yml`. That
-  clears the measured 1.76 GiB worker peak with room for page cache and a
-  second scheduler tab, and lets both JVMs size themselves from the cgroup.
-- **Tight but viable:** `mem_limit: 2g`. Verified to complete a full YouTube
-  patch. Leaves little headroom - a larger app or more patches may not fit.
-- **Do not go below 2 GiB** if you patch YouTube-class apps. 1.5 GiB failed both
-  with the default fraction and with a raised one.
-- **Do not set `-Xmx` on the worker.** It is spawned deliberately without flags
-  so it can use whatever the machine has for the duration of one job.
-- **Want a small idle footprint *and* working patch runs?** Put the old flags
-  back on the **admin server only**, as command-line arguments in
-  `supervisord.conf`:
-
-  ```
-  command=java -Xmx512m -Xms64m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC \
-      -Dio.netty.allocator.type=unpooled -XX:MaxDirectMemorySize=64m -jar /app/app.jar
-  ```
-
-  Use the command line, **not** `JAVA_TOOL_OPTIONS`: the worker is launched with
-  `ProcessBuilder` and inherits the environment, so anything set that way lands
-  on the patch worker too and re-creates exactly the problem above. (`-Xmx512m`
-  on the admin server is safe - it was the shipped default for a long time.)
+- **All-in-one (the default, `RUN_SCHEDULERS` unset):** `mem_limit: 2500m`.
+  This container spawns the patch worker, so it must clear the worker's
+  ~1.76 GiB peak. **Do not go below 2 GiB** if you patch YouTube-class apps.
+- **Split mode (`RUN_SCHEDULERS=false`):** `512m` for the server, which never
+  patches anything, and `2500m` for the builder container.
+- **Tuning the worker:** raise `PATCH_WORKER_XMX` if a big app OOMs, and raise
+  `mem_limit` with it. The worker also now runs with
+  `-XX:+ExitOnOutOfMemoryError`, so a heap-exhausted run dies immediately and
+  reports, instead of thrashing until the 20-minute timeout while holding its
+  peak.
+- **Shrinking the server further:** `SERVER_JVM_XMX=192m` works, but the
+  returns are small - at `-Xmx256m` the heap is already not the largest part
+  of the footprint. Getting meaningfully below ~150 MiB means not running a
+  JVM for the always-on half at all; see the note in
+  `docs/integration-spec.md` section 6.
 
 ### Recognizing a too-small limit
 
-The two failure modes look different and the log now names both:
+The two failure modes look different and the log names both:
 
 - `patch worker exited with code 1 without writing a response - check the
   worker's output above for OutOfMemoryError (the JVM's own heap, not the
-  container limit)` - the **JVM heap** was too small. Raise `mem_limit`; the
-  container itself may look far from full.
+  container limit)` - the **JVM heap** was too small. Raise
+  `PATCH_WORKER_XMX` (and `mem_limit` to match); the container itself may look
+  far from full.
 - `patch worker exited with code 137 without writing a response - killed by
   SIGKILL, which normally means the container hit its memory limit` - the
   **container** ran out and the kernel killed the worker. Confirm with
   `cat /sys/fs/cgroup/memory.events` inside the container (`oom_kill` > 0).
 
 Either way the job fails cleanly: no APK is published, nothing is recorded as
-processed, and the next scheduled run retries the same version.
+processed, and the next run retries the same version.
 
-### Unrelated limit worth knowing
+### Request timeouts
 
-"Patch now" and "Patch specific version" are synchronous, and a YouTube-class
-patch takes 2-3 minutes - longer than nginx's `proxy_read_timeout`. The browser
-gets a **504 Gateway Time-out while the patch continues and completes
-normally**. Watch the logs rather than the HTTP response, and re-check the
-Patched Apps list afterwards.
+In **all-in-one** mode "Patch now" and "Patch specific version" are
+synchronous, and a YouTube-class patch takes 2-3 minutes - longer than nginx's
+`proxy_read_timeout`. The browser gets a **504 Gateway Time-out while the patch
+continues and completes normally**. Watch the logs rather than the HTTP
+response, and re-check the Patched Apps list afterwards.
+
+In **split** mode this cannot happen: the button returns `202 Accepted`
+immediately, having only written a request file, and the UI polls
+`/api/builder/status` for progress.
+
+## Roles: serving vs building
+
+One image, two roles, selected by the container's command:
+
+| Command | What it does |
+| --- | --- |
+| `server` (default `CMD`) | nginx serves the repo; the JVM serves `/admin` and `/api/`. Runs the GitHub/patch scheduler loops too, unless `RUN_SCHEDULERS=false`. |
+| `builder run [--full\|--requests-only]` | One-shot: GitHub checks, patching, `fdroid update`, archive pruning, cleanup. Then exits. |
+
+`RUN_SCHEDULERS` defaults to **true**, so the shipped behaviour is the
+single-container setup this image has always had. That default is deliberate:
+the image is pulled automatically by `podman auto-update`, and a new image must
+not stop the repo publishing just because the host has not been given a builder
+timer yet.
+
+Setting `RUN_SCHEDULERS=false` splits the two. The server then holds no
+scheduler loops, and the admin UI's "Patch now" / "Check now" buttons write a
+request file into `/srv/fdroid/.requests/` instead of patching in-process; a
+host-side systemd `.path` unit notices it and starts a builder container. The
+app needs no container socket and no extra privileges for this — it only
+writes a file. `docs/integration-spec.md` has the quadlets, the timer, and the
+request/status file schemas.
+
+Only one builder can run at a time: it takes an OS advisory lock
+(`.status/builder.lock`) for the whole run, so a nightly timer firing while a
+UI-triggered run is still going is safe — the second one exits 0 without doing
+anything. Every step is idempotent, so a killed run can just be triggered
+again.
+
+### What is served
+
+`nginx.conf` serves **only** these paths and returns 404 for everything else:
+
+`/repo`, `/archive`, `/patched/repo`, `/patched/archive`, `/patched-tv/repo`,
+`/patched-tv/archive`, `/icons`, `/admin`, `/api/`, `/health`; `/` redirects to
+`/admin`.
+
+This replaced a catch-all `location /` with `root /srv/fdroid` and
+`autoindex on`, which served **every file in the repo data directory** —
+including `keystore.p12`, `patched-keystore.jks`, `patched-tv-keystore.jks`,
+and the `config.yml` that holds their passwords in plaintext. If you have an
+older deployment of this image behind a public proxy, treat those keys as
+exposed; `docs/integration-spec.md` section 0 has the check and the options.
+
+The practical consequence of the allowlist: **a new public directory under
+`/srv/fdroid` will not be served until it is added to `nginx.conf`.**
+
+## Storage
+
+`/srv/fdroid` grows in three places, and each is now bounded:
+
+| Directory | Bounded by | Notes |
+| --- | --- | --- |
+| `repo/`, `patched/repo/`, `patched-tv/repo/` | `max_versions_per_app` (Settings page) | published APKs; clients download these |
+| `archive/` and the per-channel archives | **`ARCHIVE_KEEP`** (default 3) | older versions rotated out of `repo/` by `archive_older` |
+| `tmp/`, `patched/tmp/`, `patched-tv/tmp/` | deleted after every successful run | downloads, bundle merges, patch scratch |
+
+`ARCHIVE_KEEP` keeps the newest N versions **per app** and deletes the rest,
+then refreshes the index of any repo it changed. It ranks by the version code
+in F-Droid's own `packageName_versionCode.apk` filename, numerically — a file
+that does not match that pattern is left alone rather than guessed at. Set
+`ARCHIVE_KEEP=0` to disable pruning entirely.
+
+Deleting archived versions is the one change here that clients can see: they
+lose the ability to install versions older than the newest N from the archive
+repo. Everything in there is a rebuildable published or patched build.
+
+Intermediates are cleaned only after a **successful** run — on a failure they
+are the evidence, and the already-downloaded APK makes the retry cheaper. Set
+`KEEP_PREPARED_APKS=true` to keep the downloaded-APK cache if bandwidth is
+scarcer than disk. Published APKs are never deleted by this cleanup; note that
+`patched/` and `patched-tv/` are *repositories*, not scratch directories,
+despite the names.
 
 ## Configuration Options
 
@@ -551,24 +642,30 @@ env var, or edit the paths directly) for data persistence:
 - `${CONFIG_FOLDER}/fdroid-data/` → `/srv/fdroid` — repo, patched-repo,
   patched-tv-repo, and metadata (everything the `fdroid` CLI manages)
 - `${CONFIG_FOLDER}/db` → `/app/db` — the SQLite database (all settings,
-  GitHub repos, patch library/targets, checked-release history)
-- `${CONFIG_FOLDER}/logs` → `/var/log` — optional, for persisting logs across
-  container recreation
+  GitHub repos, patch library/targets, checked-release history). Small, and
+  must be backed up.
+- `${CONFIG_FOLDER}/keys` → `/keys` — keystores. Looked up here *first*, with
+  a fallback to `/srv/fdroid`, so mounting it while empty changes nothing.
+  This is what lets the small must-be-backed-up material live apart from the
+  tens of GB of rebuildable APKs — see `docs/integration-spec.md`.
+- `${CONFIG_FOLDER}/logs` → `/var/log` — nginx logs. The app's own log goes to
+  the container's stdout now that supervisord is gone and the JVM is PID 1.
 
 ## Monitoring and Maintenance
 
 ### View Logs
 
 ```bash
-# All logs
-docker-compose logs -f
-
-# Just the updater
+# The app's log (it is PID 1, so this is the container log)
 docker-compose logs -f fdroid-repo
 
-# Live log file
-docker exec fdroid-repo tail -f /var/log/supervisor/fdroid-server.log
+# nginx
+docker exec fdroid-repo tail -f /var/log/nginx/access.log
 ```
+
+There is no `/var/log/supervisor/fdroid-server.log` any more: supervisord was
+removed, the JVM is PID 1, and its log goes to the container's stdout. On the
+homelab that means `podman logs fdroid-repo` or journald.
 
 ### Force Update Check
 
@@ -583,8 +680,13 @@ docker-compose restart
 ### Health Check
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8080/health      # nginx
+curl http://localhost:8080/api/health  # the JVM behind /admin and /api/
 ```
+
+The container's own `HEALTHCHECK` probes **both**, deliberately: `/health` is a
+static `return 200` from nginx and keeps answering while the JVM is wedged, so
+on its own it cannot tell `podman auto-update` that an image is bad.
 
 ## Troubleshooting
 

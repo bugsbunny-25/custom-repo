@@ -1,5 +1,9 @@
 package app.fdroidserver.admin.routes
 
+import app.fdroidserver.builder.BuildJobKind
+import app.fdroidserver.builder.BuildState
+import app.fdroidserver.builder.BuildTrigger
+import app.fdroidserver.builder.TriggerOutcome
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.github.GithubScheduler
 import io.ktor.http.HttpStatusCode
@@ -7,6 +11,7 @@ import io.ktor.server.application.call
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
+import io.ktor.server.routing.RoutingContext
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -24,7 +29,7 @@ data class RepoOkResponse(val ok: Boolean = true, val repo: AppConfig.RepoPayloa
 
 /** The "GitHub" tab's API - unchanged endpoints/shapes from the Python
  * version's `/api/repos*` routes, just backed by SQLite via [AppConfig]. */
-fun Route.repoRoutes(appConfig: AppConfig, githubScheduler: GithubScheduler) {
+fun Route.repoRoutes(appConfig: AppConfig, githubScheduler: GithubScheduler, buildTrigger: BuildTrigger) {
     get("/api/repos") {
         call.respond(ReposResponse(appConfig.listRepos()))
     }
@@ -58,11 +63,7 @@ fun Route.repoRoutes(appConfig: AppConfig, githubScheduler: GithubScheduler) {
     // take longer than the nginx proxy timeout) and the UI polls
     // /api/repos/check-status until it finishes.
     post("/api/repos/check") {
-        if (githubScheduler.startCheckNow()) {
-            call.respond(HttpStatusCode.Accepted, CheckStartedResponse())
-        } else {
-            call.respond(HttpStatusCode.Conflict, ErrorResponse("A GitHub check is already running"))
-        }
+        respondToCheck(buildTrigger.trigger(BuildJobKind.GITHUB))
     }
 
     post("/api/repos/{id}/check") {
@@ -72,15 +73,32 @@ fun Route.repoRoutes(appConfig: AppConfig, githubScheduler: GithubScheduler) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Repo not found"))
         } else if (!repo.enabled) {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("${repo.repo} is paused - switch it back on to check it"))
-        } else if (githubScheduler.startCheckNow(repo.repo)) {
-            call.respond(HttpStatusCode.Accepted, CheckStartedResponse())
         } else {
-            call.respond(HttpStatusCode.Conflict, ErrorResponse("A GitHub check is already running"))
+            respondToCheck(buildTrigger.trigger(BuildJobKind.GITHUB, repo = repo.repo))
         }
     }
 
+    // In all-in-one mode this is the scheduler's own live state. In split
+    // mode the check happens in the builder container, so the builder's
+    // status document is translated into the same shape - which is what lets
+    // the admin UI's existing polling loop work unchanged in both modes.
     get("/api/repos/check-status") {
-        call.respond(githubScheduler.checkStatus)
+        val builderStatus = buildTrigger.status()
+        if (builderStatus == null) {
+            call.respond(githubScheduler.checkStatus)
+        } else {
+            val githubStep = builderStatus.steps.firstOrNull { it.name == "github-releases" }
+            call.respond(
+                GithubScheduler.CheckStatus(
+                    running = builderStatus.state == BuildState.RUNNING,
+                    repo = builderStatus.githubRepo,
+                    downloaded = builderStatus.githubDownloaded,
+                    indexUpdated = builderStatus.indexUpdated,
+                    finishedAt = builderStatus.finishedAt,
+                    error = builderStatus.error ?: githubStep?.takeIf { it.state == "failed" }?.message,
+                ),
+            )
+        }
     }
 
     delete("/api/repos/{id}/checked/{releaseId}") {
@@ -96,5 +114,21 @@ fun Route.repoRoutes(appConfig: AppConfig, githubScheduler: GithubScheduler) {
         } else {
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Checked entry not found"))
         }
+    }
+}
+
+/**
+ * The GitHub check's own response shape.
+ *
+ * Unlike a patch run, this endpoint was always asynchronous - it returns 202
+ * immediately and the UI polls /api/repos/check-status - so a queued request
+ * in split mode is indistinguishable to the UI from a started check in
+ * all-in-one mode, and both answer 202.
+ */
+private suspend fun RoutingContext.respondToCheck(outcome: TriggerOutcome) {
+    when (outcome) {
+        is TriggerOutcome.Ran -> call.respond(HttpStatusCode.Accepted, CheckStartedResponse())
+        is TriggerOutcome.Queued -> call.respond(HttpStatusCode.Accepted, CheckStartedResponse())
+        is TriggerOutcome.Busy -> call.respond(HttpStatusCode.Conflict, ErrorResponse(outcome.message))
     }
 }

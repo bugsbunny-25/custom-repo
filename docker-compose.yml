@@ -1,44 +1,49 @@
-version: '3.8'
-
 services:
+  # The always-on container: nginx serves the repo, the JVM serves /admin and
+  # /api/. With RUN_SCHEDULERS left at its default it also runs the GitHub and
+  # patch loops itself, which is the single-container setup this image has
+  # always had.
+  #
+  # For the split setup (serving separated from building), set
+  # RUN_SCHEDULERS=false here and run the `builder` profile below on a timer.
+  # docs/integration-spec.md has the systemd/quadlet version of that.
   fdroid-repo:
     image: ghcr.io/bugsbunny-25/custom-repo:main
     container_name: fdroid-repo
     restart: unless-stopped
+    # `server` is the image's default command; spelled out for clarity.
+    command: ["server"]
 
-    # No container-wide mem_limit, and no JVM resource flags in
-    # supervisord.conf either - both the admin-server JVM and the short-lived
-    # patch-worker JVM spawned per job (see PatchWorkerLauncher) size
-    # themselves the way the JVM normally does, against whatever memory they
-    # see. On a large host that means a large default heap even when idle.
+    # Both JVMs are now capped explicitly (see docker-entrypoint.sh), so this
+    # limit no longer has to double as the heap setting. It still needs to be
+    # generous enough for a patch run, because this container spawns the patch
+    # worker child JVM: PATCH_WORKER_XMX defaults to 1536m and a
+    # YouTube-class run (81 patches) peaks around 1.76 GiB resident.
     #
-    # mem_limit is the one place worth setting if you want a ceiling: the JVM
-    # reads the cgroup limit, so one value here bounds both processes instead
-    # of hard-coding heap sizes per process.
-    #
-    # Careful with the number. With no -Xmx a JVM takes 25% of what it can see,
-    # so a limit is roughly 4x the usable heap: mem_limit 1g gives the patcher a
-    # 256m heap and a YouTube-class patch dies of OutOfMemoryError with the
-    # container still ~140 MiB short of full. Measured on YouTube 21.36.45 with
-    # 81 patches: 2g works, 1.5g fails, worker RSS peaks at ~1.76 GiB when given
-    # room. 3g is the comfortable choice.
-    #
-    # See README.md "Memory and resource limits" for the full measurements,
-    # both failure modes, and how to shrink only the admin server's idle
-    # footprint without starving patch runs.
-    # mem_limit: 3g
+    # Measured idle for this container is ~151 MiB of anonymous memory
+    # (plus reclaimable page cache). In split mode - RUN_SCHEDULERS=false, so
+    # no patch worker is ever spawned here - 512m is plenty.
+    mem_limit: 2500m
 
     volumes:
-      # Persist the F-Droid repository data
+      # The F-Droid repository data. Mixed backup needs: config.yml and
+      # metadata/ must be kept, repo/ and archive/ are rebuildable. See the
+      # integration spec for splitting these across disks.
       - ${CONFIG_FOLDER}/fdroid-data/:/srv/fdroid
 
-      # Persist the SQLite database (all app settings, GitHub repos, patch
-      # library/targets, checked-release history). Everything is configured
-      # through the admin UI's Settings page after first run - there's no
-      # config.yml to hand-edit anymore.
+      # The SQLite database (settings, GitHub repos, patch library/targets,
+      # checked-release history). Small, and must be backed up. Everything is
+      # configured through the admin UI's Settings page after first run.
       - ${CONFIG_FOLDER}/db:/app/db
 
-      # Optional: persist logs
+      # Keystores. Looked up here first, falling back to /srv/fdroid, so this
+      # is safe to mount while still empty. Small, and must be backed up -
+      # losing these means every client has to re-add the repo.
+      - ${CONFIG_FOLDER}/keys:/keys
+
+      # nginx logs. The app's own log now goes to the container's stdout
+      # (`docker logs fdroid-repo`) rather than to a file here, because
+      # supervisord is gone and the JVM is PID 1.
       - ${CONFIG_FOLDER}/logs:/var/log
 
     environment:
@@ -46,18 +51,49 @@ services:
       # Root log level for the app (logback.xml reads this, defaulting to
       # INFO if unset). One of ERROR, WARN, INFO, DEBUG, TRACE.
       - LOG_LEVEL=INFO
-      # Override for a different DB directory; defaults to /app/db (the
-      # app.db file is created inside it automatically if missing)
-      # - DB_PATH=/app/db
-    
-    # Expose port (will be proxied by your nginx reverse proxy)
+      # Newest versions per app to keep in archive/. 0 disables pruning.
+      - ARCHIVE_KEEP=3
+      # Set to false to stop this container patching anything; UI actions
+      # then queue request files for the builder below.
+      # - RUN_SCHEDULERS=false
+      # Heap caps, if the defaults need changing.
+      # - SERVER_JVM_XMX=256m
+      # - PATCH_WORKER_XMX=1536m
+
     ports:
       - "8080:80"  # Change 8080 to your preferred port
-    
-    # Health check
+
+    # The image also declares its own HEALTHCHECK (checking /health *and*
+    # /api/health, so a wedged JVM is caught). This override exists only to
+    # shorten the interval for local use.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
+
+  # One-shot builder: does the GitHub checks, patching and `fdroid update`,
+  # then exits. Not started by `docker compose up` - it sits behind a profile
+  # so you run it deliberately:
+  #
+  #   docker compose run --rm fdroid-builder
+  #
+  # On the homelab this is a systemd timer plus a .path unit watching
+  # /srv/fdroid/.requests; see docs/integration-spec.md section 5.
+  fdroid-builder:
+    image: ghcr.io/bugsbunny-25/custom-repo:main
+    profiles: ["builder"]
+    command: ["builder", "run", "--full"]
+    restart: "no"
+    mem_limit: 2500m
+    volumes:
+      - ${CONFIG_FOLDER}/fdroid-data/:/srv/fdroid
+      - ${CONFIG_FOLDER}/db:/app/db
+      - ${CONFIG_FOLDER}/keys:/keys
+    environment:
+      - TZ=UTC
+      - LOG_LEVEL=INFO
+      - ARCHIVE_KEEP=3
+      # - BUILDER_JVM_XMX=256m
+      # - PATCH_WORKER_XMX=1536m

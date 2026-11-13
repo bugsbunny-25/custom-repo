@@ -15,14 +15,39 @@ import org.yaml.snakeyaml.Yaml
  */
 class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(FdroidRepoManager::class.java.name)) {
 
-    fun initRepo(repoDir: File) {
+    /**
+     * Creates the repo (and its keystore) if it isn't there yet. Returns
+     * true if the repo is usable afterwards.
+     *
+     * The exit code used to be discarded, which hid a real failure mode: on
+     * an image missing `setuptools`, `fdroid init` creates `repo/` and then
+     * dies in its `from pkg_resources import get_distribution` fallback
+     * (fdroidserver/init.py) without writing `config.yml`. The caller saw
+     * nothing and the app carried on into first-run setup as though the
+     * volume were simply new. So both the exit code and the artifact it is
+     * supposed to produce are checked, and a failure is logged loudly.
+     */
+    fun initRepo(repoDir: File): Boolean {
         repoDir.mkdirs()
-        if (File(repoDir, "config.yml").exists()) {
+        val configFile = File(repoDir, "config.yml")
+        if (configFile.exists()) {
             logger.info("F-Droid repository already initialized at $repoDir")
-            return
+            return true
         }
         logger.info("Initializing F-Droid repository at $repoDir...")
-        runFdroid(repoDir, "init")
+        val (exitCode, output) = runFdroid(repoDir, "init")
+        if (exitCode != 0) {
+            logger.error("`fdroid init` failed in $repoDir (exit $exitCode): $output")
+            return false
+        }
+        if (!configFile.exists()) {
+            logger.error(
+                "`fdroid init` reported success in $repoDir but wrote no config.yml - " +
+                    "the repo is half-initialized and will not publish. Output: $output",
+            )
+            return false
+        }
+        return true
     }
 
     private val yaml: Yaml = run {
@@ -154,6 +179,85 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
                     logger.info("Removing old APK for $key: ${old.name}")
                     old.delete()
                 }
+            }
+        }
+    }
+
+    /**
+     * Bounds the `archive/` directory to the newest [keep] versions per app.
+     *
+     * `archive_older` moves versions out of `repo/` into `archive/` but never
+     * removes them, so the archive grows without limit - 16 GB of 180 old
+     * versions on the deployment this was written for, on the disk that gets
+     * backed up nightly. Everything in there is rebuildable (published APKs
+     * and patched builds), so a bound is safe; what is not safe is losing the
+     * *newest* versions, hence keep-newest-N rather than delete-older-than-N.
+     *
+     * Archive filenames are F-Droid's own `packageName_versionCode.apk`
+     * shape, which is why this cannot reuse [pruneOldVersions] - that ranks
+     * dotted version *names* out of this project's own
+     * `{targetId}__{patchId}__{version}.apk` naming. Here the trailing
+     * integer is the version code and sorts numerically; a file that does not
+     * match the pattern is left alone rather than guessed at.
+     *
+     * Each removed APK's sidecar files (`.asc` signatures, and the
+     * `_src.tar.gz` sources F-Droid writes next to an APK) go with it, since
+     * an archive entry with no APK is just dead weight in the index.
+     *
+     * `keep <= 0` disables pruning entirely, matching the keep-all
+     * convention [pruneOldVersions] already uses.
+     *
+     * Returns the number of APKs deleted, so the caller knows whether the
+     * index needs regenerating.
+     */
+    fun pruneArchive(repoDir: File, keep: Int): Int {
+        if (keep <= 0) return 0
+        val archiveDir = File(repoDir, "archive")
+        if (!archiveDir.isDirectory) return 0
+
+        val apks = archiveDir.listFiles { f -> f.isFile && f.extension == "apk" } ?: return 0
+        // packageName_versionCode.apk -> (packageName, versionCode)
+        val parsed = apks.mapNotNull { file ->
+            val stem = file.nameWithoutExtension
+            val code = stem.substringAfterLast('_', "").toLongOrNull() ?: return@mapNotNull null
+            val pkg = stem.substringBeforeLast('_', "")
+            if (pkg.isEmpty()) null else Triple(file, pkg, code)
+        }
+        val unparsed = apks.size - parsed.size
+        if (unparsed > 0) {
+            logger.info("Archive prune in $archiveDir: leaving $unparsed file(s) alone - name is not packageName_versionCode.apk")
+        }
+
+        var deleted = 0
+        for ((pkg, entries) in parsed.groupBy { it.second }) {
+            val sorted = entries.sortedByDescending { it.third }
+            if (sorted.size <= keep) continue
+            for ((file, _, code) in sorted.drop(keep)) {
+                logger.info("Archive prune: removing $pkg version code $code (${file.name})")
+                if (file.delete()) {
+                    deleted++
+                    deleteSidecars(file)
+                } else {
+                    logger.warn("Archive prune: failed to delete ${file.name}")
+                }
+            }
+        }
+        if (deleted > 0) {
+            logger.info("Archive prune in $archiveDir: removed $deleted APK(s), keeping newest $keep per app")
+        }
+        return deleted
+    }
+
+    /** Removes the files F-Droid writes alongside an APK, if present. */
+    private fun deleteSidecars(apk: File) {
+        val parent = apk.parentFile ?: return
+        listOf(
+            File(parent, apk.name + ".asc"),
+            File(parent, apk.nameWithoutExtension + "_src.tar.gz"),
+            File(parent, apk.nameWithoutExtension + "_src.tar.gz.asc"),
+        ).forEach { sidecar ->
+            if (sidecar.exists() && sidecar.delete()) {
+                logger.info("Archive prune: removed sidecar ${sidecar.name}")
             }
         }
     }

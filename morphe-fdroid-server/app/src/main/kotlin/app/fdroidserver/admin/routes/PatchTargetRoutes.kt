@@ -1,7 +1,9 @@
 package app.fdroidserver.admin.routes
 
+import app.fdroidserver.builder.BuildJobKind
+import app.fdroidserver.builder.BuildTrigger
+import app.fdroidserver.builder.TriggerOutcome
 import app.fdroidserver.config.AppConfig
-import app.fdroidserver.patching.PatchScheduler
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.request.receive
@@ -22,8 +24,23 @@ data class TargetOkResponse(val ok: Boolean = true, val target: AppConfig.PatchT
 @Serializable
 data class AttachmentOkResponse(val ok: Boolean = true, val attachment: AppConfig.PatchAttachmentView)
 
+/**
+ * Result of a "Patch now"-style request.
+ *
+ * [updated] is what the admin UI has always read. [queued] and [requestId]
+ * are added for split mode, where the work is handed to a builder container
+ * instead of being done here: the response then arrives before the work has
+ * started, so `updated` cannot mean anything yet and the UI polls
+ * /api/builder/status instead. Both new fields default to the all-in-one
+ * values, so an older UI against a newer server still behaves.
+ */
 @Serializable
-data class RunResponse(val ok: Boolean = true, val updated: Boolean)
+data class RunResponse(
+    val ok: Boolean = true,
+    val updated: Boolean = false,
+    val queued: Boolean = false,
+    val requestId: String? = null,
+)
 
 @Serializable
 data class RunVersionPayload(val version: String, val versionPageUrl: String)
@@ -31,15 +48,19 @@ data class RunVersionPayload(val version: String, val versionPageUrl: String)
 /** The Patching tab's "Patched Apps" API - CRUD on patch targets plus
  * attach/detach of library patches, matching the Python version's
  * `/api/patch-targets*` routes exactly. Registered twice (once per
- * [AppConfig.PatchSchema] / [PatchScheduler] instance) with distinct
+ * [AppConfig.PatchSchema]) with distinct
  * [basePath]s so the "Patching" and "Patched TV" tabs get fully independent
  * app targets. */
 fun Route.patchTargetRoutes(
     appConfig: AppConfig,
-    patchScheduler: PatchScheduler,
+    buildTrigger: BuildTrigger,
     schema: AppConfig.PatchSchema,
     basePath: String = "/api/patch-targets",
 ) {
+    val isTv = schema == AppConfig.PatchSchemas.Tv
+    val targetKind = if (isTv) BuildJobKind.PATCH_TARGET_TV else BuildJobKind.PATCH_TARGET
+    val versionKind = if (isTv) BuildJobKind.PATCH_VERSION_TV else BuildJobKind.PATCH_VERSION
+    val sweepKind = if (isTv) BuildJobKind.PATCH_TV else BuildJobKind.PATCH
     get(basePath) {
         call.respond(TargetsResponse(appConfig.listPatchTargets(schema)))
     }
@@ -53,8 +74,7 @@ fun Route.patchTargetRoutes(
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid patch target id"))
             return@post
         }
-        val updated = patchScheduler.runTargetNow(id)
-        call.respond(RunResponse(updated = updated))
+        respondToTrigger(buildTrigger.trigger(targetKind, targetId = id))
     }
 
     // "Patch specific version" button - patches a target at a user-pasted
@@ -74,13 +94,18 @@ fun Route.patchTargetRoutes(
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("version and versionPageUrl are required"))
             return@post
         }
-        val updated = patchScheduler.runSpecificVersion(id, payload.version, payload.versionPageUrl)
-        call.respond(RunResponse(updated = updated))
+        respondToTrigger(
+            buildTrigger.trigger(
+                versionKind,
+                targetId = id,
+                version = payload.version,
+                versionPageUrl = payload.versionPageUrl,
+            ),
+        )
     }
 
     post("$basePath/run-all") {
-        val updated = patchScheduler.checkForUpdates()
-        call.respond(RunResponse(updated = updated))
+        respondToTrigger(buildTrigger.trigger(sweepKind))
     }
 
     post(basePath) {
