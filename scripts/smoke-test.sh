@@ -57,11 +57,30 @@ fi
 
 WORK="$(mktemp -d)"
 CLEANUP_IDS=()
+
+# Two things this has to get right, both learned the hard way in CI:
+#
+#  - The container writes into $WORK as root. Under Docker on Linux that is
+#    host root, so the runner user cannot delete those files and a plain
+#    `rm -rf "$WORK"` fails. (It does not fail under Apple's `container` on
+#    macOS, which maps the mount to the calling user - which is exactly why
+#    this only showed up in CI.) So ownership is handed back from inside a
+#    container first.
+#  - A failing last command in an EXIT trap becomes the script's exit status
+#    in bash. That turned a clean "27 passed, 0 failed" run into a red
+#    check. The original status is captured up front and re-exited
+#    explicitly, so cleanup can never change the verdict either way.
 cleanup() {
+    status=$?
     for id in ${CLEANUP_IDS+"${CLEANUP_IDS[@]}"}; do
         $RUNTIME rm -f "$id" >/dev/null 2>&1 || true
     done
-    rm -rf "$WORK"
+    if [ -d "$WORK" ]; then
+        $RUNTIME run --rm "${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"}" -v "$WORK:/w" "$IMAGE" \
+            chown -R "$(id -u):$(id -g)" /w >/dev/null 2>&1 || true
+        rm -rf "$WORK" >/dev/null 2>&1 || true
+    fi
+    exit "$status"
 }
 trap cleanup EXIT
 
@@ -72,7 +91,7 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
 note() { printf '       %s\n' "$1"; }
 section() { printf '\n== %s\n' "$1"; }
 
-run() { $RUNTIME run --rm "${ARCH_ARGS[@]}" "$@"; }
+run() { $RUNTIME run --rm "${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"}" "$@"; }
 
 # ---------------------------------------------------------------------------
 section "1. required tools"
@@ -222,7 +241,7 @@ mkdir -p "$WORK/data"
 printf 'keystorepass: SMOKETESTSECRET\nkeypass: SMOKETESTSECRET\n' > "$WORK/data/smoke-config-probe.yml"
 cp "$WORK/data/smoke-config-probe.yml" "$WORK/data/keystore-probe.p12"
 
-cid="$($RUNTIME run -d "${ARCH_ARGS[@]}" \
+cid="$($RUNTIME run -d "${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"}" \
     -v "$WORK/data:/srv/fdroid" -v "$WORK/db:/app/db" \
     -e RUN_SCHEDULERS=false "$IMAGE" server 2>/dev/null)"
 CLEANUP_IDS+=("$cid")
