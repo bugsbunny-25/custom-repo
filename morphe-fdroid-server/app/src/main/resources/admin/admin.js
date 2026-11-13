@@ -446,6 +446,82 @@ async function pollRepoCheck() {
 }
 
 // =============================================================================
+// Builder runs (split deployment)
+// =============================================================================
+// When the server runs with RUN_SCHEDULERS=false it does not patch anything
+// itself: a "Patch now" POST returns 202 with {queued: true, request_id} and a
+// builder container picks the request up. The buttons therefore have two
+// possible outcomes, and these helpers absorb the difference so each handler
+// stays one line either way.
+
+/** Polls /api/builder/status until the run stops, reporting the result. */
+async function pollBuilderRun() {
+  if (state.builderPolling) return;
+  state.builderPolling = true;
+  try {
+    // The builder container may take a few seconds to be started by the
+    // host's .path unit, so a status that is still "idle" is not yet proof
+    // that nothing happened - keep waiting for a while before giving up.
+    let idleTicks = 0;
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      let status;
+      try {
+        status = await api('GET', '/api/builder/status');
+      } catch (e) {
+        showBuilderStatus('Lost track of the build. Reload the page to see the result.', 'error');
+        return;
+      }
+      if (status.state === 'RUNNING') {
+        idleTicks = 0;
+        showBuilderStatus(`Building: ${status.current_step || 'starting…'}`);
+        continue;
+      }
+      if (status.state === 'IDLE' && idleTicks++ < 20) {
+        showBuilderStatus('Waiting for the builder to start…');
+        continue;
+      }
+      if (status.state === 'FAILED') {
+        showBuilderStatus(`Build failed: ${status.error || 'see the builder log'}`, 'error');
+      } else if (status.state === 'SUCCEEDED') {
+        const bits = [];
+        if (status.patched_count) bits.push(plural(status.patched_count, 'new build'));
+        if (status.github_downloaded) bits.push(plural(status.github_downloaded, 'new APK'));
+        showBuilderStatus(bits.length ? `Build finished: ${bits.join(', ')}.` : 'Build finished: nothing new to publish.', 'success');
+      } else {
+        showBuilderStatus('The builder has not run yet.', 'error');
+      }
+      return;
+    }
+  } finally {
+    state.builderPolling = false;
+  }
+}
+
+function showBuilderStatus(message, kind = '') {
+  const banner = $('#repoCheckStatus');
+  if (!banner) return;
+  banner.hidden = !message;
+  banner.className = `banner ${kind ? `is-${kind}` : ''}`;
+  banner.innerHTML = toHtml(kind ? message : html`<span class="spinner"></span>${message}`);
+}
+
+/**
+ * Reports a run that either happened here or was handed to the builder.
+ * `labels.queued` is shown immediately in the queued case; the banner then
+ * tracks the run itself.
+ */
+async function reportRunOutcome(result, labels) {
+  if (result && result.queued) {
+    toast(labels.queued, 'info');
+    showBuilderStatus('Waiting for the builder to start…');
+    pollBuilderRun();
+    return;
+  }
+  toast(result.updated ? labels.done : labels.nothing, result.updated ? 'success' : 'info');
+}
+
+// =============================================================================
 // Patched apps (both channels)
 // =============================================================================
 
@@ -958,7 +1034,11 @@ onSubmit($('#versionForm'), async () => {
     version_page_url: $('#versionPageUrl').value.trim(),
   });
   closeDialog('versionDialog');
-  toast(result.updated ? 'Patched and published' : 'Nothing new was published. Check the logs for details.', result.updated ? 'success' : 'info');
+  await reportRunOutcome(result, {
+    done: 'Patched and published',
+    nothing: 'Nothing new was published. Check the logs for details.',
+    queued: 'Queued a build of that version',
+  });
   await loadChannel(channel);
 });
 
@@ -1102,13 +1182,21 @@ const actions = {
     const channel = channelOf(el);
     const target = findTarget(channel, el.dataset.id);
     const result = await withBusy(el, 'Patching…', () => api('POST', `${channel.apiTargets}/${target.id}/run`));
-    toast(result.updated ? `Published a new build of ${target.name}` : `Nothing new to publish for ${target.name}`, result.updated ? 'success' : 'info');
+    await reportRunOutcome(result, {
+      done: `Published a new build of ${target.name}`,
+      nothing: `Nothing new to publish for ${target.name}`,
+      queued: `Queued a build of ${target.name}`,
+    });
     await loadChannel(channel);
   },
   'patch-all': async (el) => {
     const channel = channelOf(el);
     const result = await withBusy(el, 'Patching…', () => api('POST', `${channel.apiTargets}/run-all`));
-    toast(result.updated ? 'Published new builds' : 'Everything is up to date', result.updated ? 'success' : 'info');
+    await reportRunOutcome(result, {
+      done: 'Published new builds',
+      nothing: 'Everything is up to date',
+      queued: 'Queued a build of every watched app',
+    });
     await loadChannel(channel);
   },
   'delete-target': async (el) => {

@@ -1,11 +1,14 @@
 package app.fdroidserver.admin
 
 import app.fdroidserver.admin.routes.adminUiRoutes
+import app.fdroidserver.admin.routes.healthRoutes
 import app.fdroidserver.admin.routes.patchLibraryRoutes
 import app.fdroidserver.admin.routes.patchTargetRoutes
 import app.fdroidserver.admin.routes.repoRoutes
 import app.fdroidserver.admin.routes.settingsRoutes
 import app.fdroidserver.admin.routes.setupRoutes
+import app.fdroidserver.builder.BuildTrigger
+import app.fdroidserver.builder.InProcessBuildTrigger
 import app.fdroidserver.config.AppConfig
 import app.fdroidserver.config.AppConfig.PatchSchemas
 import app.fdroidserver.fdroidrepo.FdroidRepoManager
@@ -59,6 +62,13 @@ class AdminServer(
     private val patchSchedulerTv: PatchScheduler,
     private val patchSourceSchedulerTv: PatchSourceScheduler,
     private val githubScheduler: GithubScheduler,
+    /**
+     * How "Patch now" / "Check now" get done: in this process (all-in-one)
+     * or by writing a request file for a builder container (split mode).
+     * Defaults to in-process so every existing caller - and the route tests -
+     * behave exactly as before.
+     */
+    private val buildTrigger: BuildTrigger = InProcessBuildTrigger(patchScheduler, patchSchedulerTv, githubScheduler),
     private val host: String = "0.0.0.0",
     private val port: Int = 5001,
 ) {
@@ -105,13 +115,14 @@ class AdminServer(
         }
         routing {
             adminUiRoutes()
+            healthRoutes(buildTrigger)
             setupRoutes(appConfig, fdroidRepoManager, repoDir, patchedRepoDir, patchedTvRepoDir)
             settingsRoutes(appConfig, fdroidRepoManager, repoDir, patchedRepoDir, patchedTvRepoDir)
-            repoRoutes(appConfig, githubScheduler)
+            repoRoutes(appConfig, githubScheduler, buildTrigger)
             patchLibraryRoutes(appConfig, patchLibrary, patchesDir, PatchSchemas.Mobile, patchSourceScheduler, basePath = "/api/patch-library")
             patchLibraryRoutes(appConfig, patchLibrary, patchesTvDir, PatchSchemas.Tv, patchSourceSchedulerTv, basePath = "/api/patch-library-tv")
-            patchTargetRoutes(appConfig, patchScheduler, PatchSchemas.Mobile, basePath = "/api/patch-targets")
-            patchTargetRoutes(appConfig, patchSchedulerTv, PatchSchemas.Tv, basePath = "/api/patch-targets-tv")
+            patchTargetRoutes(appConfig, buildTrigger, PatchSchemas.Mobile, basePath = "/api/patch-targets")
+            patchTargetRoutes(appConfig, buildTrigger, PatchSchemas.Tv, basePath = "/api/patch-targets-tv")
         }
     }
 }

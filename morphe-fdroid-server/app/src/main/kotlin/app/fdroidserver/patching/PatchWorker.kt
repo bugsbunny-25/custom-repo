@@ -88,9 +88,13 @@ private data class PatchWorkerResponse(
  * peaks at is then given back to the OS when the child exits, rather than
  * staying resident in the admin server's heap for the container's lifetime.
  *
- * Both JVMs run with no resource flags (see supervisord.conf) and size
- * themselves against whatever memory they see - the container's cgroup limit
- * if one is set, the host's RAM otherwise.
+ * The two JVMs are sized independently and explicitly. The parent (admin
+ * server, or the builder orchestrating a run) is capped small by
+ * docker-entrypoint.sh, because it only does DB/matching/orchestration work.
+ * This child gets its own, much larger ceiling from `PATCH_WORKER_XMX`
+ * (default 1536m) applied below - deliberately passed as a command-line flag
+ * rather than inherited through the environment, since an environment-level
+ * setting could not differ between parent and child.
  *
  * Request/response cross the process boundary as JSON files under the JVM's
  * temp directory (not the persisted `/srv/fdroid` volume) - simpler than
@@ -101,6 +105,20 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
 
     private val javaBin = File(File(System.getProperty("java.home"), "bin"), "java").absolutePath
     private val jarPath = File(PatchWorkerLauncher::class.java.protectionDomain.codeSource.location.toURI()).absolutePath
+
+    /**
+     * The child's own heap ceiling. This is the one JVM in the image that
+     * genuinely needs room: a YouTube-class patch run (81 patches) peaks
+     * around 1.76 GiB resident when given space, so the default here is the
+     * figure that leaves headroom without letting a runaway run take the
+     * whole container down with it.
+     *
+     * `-XX:+ExitOnOutOfMemoryError` matters more than the number: without it
+     * a heap-exhausted worker can thrash and sit there until the 20-minute
+     * timeout below, holding its peak the whole time. With it the child dies
+     * immediately and [workerDiedMessage] explains which kind of OOM it was.
+     */
+    private val workerXmx = System.getenv("PATCH_WORKER_XMX")?.takeIf { it.isNotBlank() } ?: "1536m"
 
     fun apply(
         source: String,
@@ -146,7 +164,14 @@ class PatchWorkerLauncher(private val logger: Logger = LoggerFactory.getLogger(P
                 ),
             )
 
-            val process = ProcessBuilder(javaBin, "-jar", jarPath, PATCH_WORKER_FLAG, requestFile.absolutePath, responseFile.absolutePath)
+            val process = ProcessBuilder(
+                javaBin,
+                "-Xmx$workerXmx",
+                "-XX:+UseSerialGC",
+                "-XX:+ExitOnOutOfMemoryError",
+                "-jar", jarPath,
+                PATCH_WORKER_FLAG, requestFile.absolutePath, responseFile.absolutePath,
+            )
                 .redirectErrorStream(true)
                 .redirectOutput(ProcessBuilder.Redirect.INHERIT)
                 .start()

@@ -49,8 +49,15 @@ class ApkPureClient(
      */
     override fun getVersions(appUrl: String): List<VersionEntry> {
         val normalizedAppUrl = appUrl.trimEnd('/')
-        runCatching { get(normalizedAppUrl) }.onFailure {
-            logger.debug("apkpure: warm-up request to $normalizedAppUrl failed, fetching versions page directly instead: $it")
+        // See ApkMirrorClient.getVersions: the warm-up is skipped once
+        // clearance is held for this host, since it is then a page fetch
+        // (and possibly a browser solve) that buys nothing.
+        if (hasClearance(normalizedAppUrl)) {
+            logger.debug("apkpure: clearance already held for $normalizedAppUrl, skipping the warm-up request")
+        } else {
+            runCatching { get(normalizedAppUrl) }.onFailure {
+                logger.debug("apkpure: warm-up request to $normalizedAppUrl failed, fetching versions page directly instead: $it")
+            }
         }
 
         val url = "$normalizedAppUrl/versions"

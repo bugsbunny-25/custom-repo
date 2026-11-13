@@ -16,7 +16,6 @@ import java.net.http.HttpResponse
 import java.nio.file.StandardOpenOption
 import java.time.Duration
 import java.util.zip.ZipFile
-import kotlin.random.Random
 import org.slf4j.Logger
 
 /**
@@ -103,9 +102,31 @@ abstract class ScraperClient(
         .cookieHandler(cookieManager)
         .build()
 
+    /**
+     * The User-Agent every request goes out with.
+     *
+     * This is a `var`, and that is the whole point. Cloudflare binds a
+     * `cf_clearance` cookie to the exact User-Agent that earned it;
+     * FlareSolverr's own README says so outright: "If you want to use
+     * Cloudflare clearance cookie in your scripts, make sure you use the
+     * FlareSolverr User-Agent too. If they don't match you will see the
+     * challenge."
+     *
+     * Before this was here, [solveWithFlareSolverr] merged the solved
+     * cookies into the jar but kept sending [USER_AGENT], so the clearance
+     * cookie was rejected on the very next request - which meant every
+     * single page fetch was challenged and every single one of them paid for
+     * a fresh headless-browser solve. Adopting the UA FlareSolverr reports
+     * is what lets one solve cover the whole clearance window instead of one
+     * request.
+     */
+    @Volatile
+    protected var userAgent: String = USER_AGENT
+        private set
+
     protected fun requestBuilder(url: String, referer: String? = null): HttpRequest.Builder {
         val builder = HttpRequest.newBuilder(URI.create(url))
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", userAgent)
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .header("Accept-Language", "en-US,en;q=0.9")
             .timeout(Duration.ofSeconds(30))
@@ -124,20 +145,20 @@ abstract class ScraperClient(
      * interstitial HTML as if it were the real page.
      */
     protected fun get(url: String, referer: String? = null): String {
-        lateinit var response: HttpResponse<String>
-        for (attempt in 1..MAX_FETCH_ATTEMPTS) {
-            val request = requestBuilder(url, referer).GET().build()
-            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-            if (!isCloudflareChallenge(response)) break
-            if (attempt == MAX_FETCH_ATTEMPTS) {
-                return solveWithFlareSolverr(url) ?: error(
-                    "$sourceName: blocked by a Cloudflare challenge fetching $url after $MAX_FETCH_ATTEMPTS attempts" +
-                        if (flareSolverrUrl == null) "" else " (FlareSolverr fallback also failed)",
-                )
-            }
-            logger.warn("$sourceName: Cloudflare challenge fetching $url (attempt $attempt/$MAX_FETCH_ATTEMPTS), retrying")
-            Thread.sleep(challengeRetryDelayMs(attempt, response))
+        val request = requestBuilder(url, referer).GET().build()
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+
+        if (isCloudflareChallenge(response)) {
+            return solveWithFlareSolverr(url) ?: error(
+                "$sourceName: blocked by a Cloudflare challenge fetching $url" +
+                    if (flareSolverrUrl == null) {
+                        " (no FlareSolverr configured - set one in Settings)"
+                    } else {
+                        " (FlareSolverr fallback also failed)"
+                    },
+            )
         }
+
         if (response.statusCode() !in 200..299) {
             error("HTTP ${response.statusCode()} fetching $url")
         }
@@ -156,26 +177,48 @@ abstract class ScraperClient(
         return CLOUDFLARE_CHALLENGE_RE.containsMatchIn(response.body())
     }
 
-    /** Backoff delay before retrying a challenged request: honors a
-     * `Retry-After` header if Cloudflare sent one, otherwise exponential
-     * backoff from [BASE_RETRY_DELAY_MS] with random jitter so concurrent
-     * retries don't all land on the same instant. */
-    private fun challengeRetryDelayMs(attempt: Int, response: HttpResponse<String>): Long {
-        val retryAfterSeconds = response.headers().firstValue("retry-after").orElse(null)?.toLongOrNull()
-        if (retryAfterSeconds != null) return retryAfterSeconds * 1000
-
-        val backoff = BASE_RETRY_DELAY_MS * (1L shl (attempt - 1))
-        return backoff.coerceAtMost(MAX_RETRY_DELAY_MS) + Random.nextLong(JITTER_MS)
-    }
+    // There is deliberately no retry-with-backoff before falling back. A
+    // plain HTTP client cannot execute a managed challenge's JavaScript, so
+    // retrying one is futile by construction - it just adds latency before
+    // the only thing that can actually clear it. (The previous code had a
+    // full exponential-backoff path here, but MAX_FETCH_ATTEMPTS was 1, so
+    // none of it was ever reachable.)
 
     @Serializable
-    private data class FlareSolverrRequest(val cmd: String, val url: String, val maxTimeout: Int)
+    private data class FlareSolverrRequest(
+        val cmd: String,
+        val url: String? = null,
+        val maxTimeout: Int? = null,
+        /** Reuses an existing browser instance instead of launching and
+         * destroying Chrome per request - see [ensureSession]. */
+        val session: String? = null,
+        @SerialName("session_ttl_minutes")
+        val sessionTtlMinutes: Int? = null,
+        /** Skips images, CSS and fonts. Nothing here parses them, and they
+         * are a large part of what a headless-browser navigation costs. */
+        val disableMedia: Boolean? = null,
+    )
 
     @Serializable
-    private data class FlareSolverrResponse(val status: String, val message: String = "", val solution: FlareSolverrSolution? = null)
+    private data class FlareSolverrResponse(
+        val status: String,
+        val message: String = "",
+        val solution: FlareSolverrSolution? = null,
+        /** Returned by `sessions.create`. */
+        val session: String? = null,
+    )
 
     @Serializable
-    private data class FlareSolverrSolution(val response: String, val cookies: List<FlareSolverrCookie> = emptyList())
+    private data class FlareSolverrSolution(
+        val response: String,
+        val cookies: List<FlareSolverrCookie> = emptyList(),
+        /**
+         * The UA the headless browser actually used. Previously dropped on
+         * the floor by `ignoreUnknownKeys`, which is precisely why the
+         * clearance cookies alongside it never worked - see [userAgent].
+         */
+        val userAgent: String? = null,
+    )
 
     @Serializable
     private data class FlareSolverrCookie(
@@ -187,57 +230,180 @@ abstract class ScraperClient(
         @SerialName("httpOnly") val httpOnly: Boolean = false,
     )
 
-    private val flareSolverrJson = Json { ignoreUnknownKeys = true }
+    // explicitNulls = false so the optional fields of FlareSolverrRequest are
+    // omitted rather than sent as JSON nulls; encodeDefaults = false for the
+    // same reason. FlareSolverr reads these with Python's json module, and
+    // an explicit `"session": null` is not the same thing to it as an absent
+    // key.
+    private val flareSolverrJson = Json {
+        ignoreUnknownKeys = true
+        explicitNulls = false
+        encodeDefaults = false
+    }
 
     /**
-     * Last-resort fallback for [get] once its own retries are exhausted:
-     * asks FlareSolverr (a sidecar that drives a real headless browser
-     * specifically to clear Cloudflare challenges) to fetch [url] itself.
-     * Returns null - rather than throwing - on any failure (not configured,
-     * unreachable, couldn't solve it) so [get] can fall back to its normal
-     * "still challenged" error instead of a confusing FlareSolverr-shaped
-     * one.
+     * The FlareSolverr session this client reuses, or null if sessions are
+     * not working (an older FlareSolverr, or creation failed) and each
+     * request should launch its own throwaway browser.
      *
-     * The solved page's cookies (typically including a fresh `cf_clearance`)
-     * are merged into the shared cookie jar before returning, so it's not just
-     * this one response that benefits - every later request through this
-     * client reuses the same jar. FlareSolverr's own request isn't retried;
-     * if it fails, the normal retry loop in [get] will simply hit it again
-     * next time [get] is called.
+     * Named after the source rather than randomly generated, deliberately:
+     * each patch job runs in its own short-lived JVM
+     * ([app.fdroidserver.patching.PatchWorkerLauncher]), so a per-process
+     * random id would mean a brand-new Chrome instance for every job. A
+     * stable name lets those processes land on the browser the previous one
+     * already got clearance in.
+     */
+    @Volatile
+    private var flareSolverrSession: String? = null
+
+    @Volatile
+    private var sessionAttempted = false
+
+    /**
+     * Last-resort fallback for [get]: asks FlareSolverr (a sidecar that
+     * drives a real headless browser specifically to clear Cloudflare
+     * challenges) to fetch [url] itself. Returns null - rather than throwing
+     * - on any failure (not configured, unreachable, couldn't solve it) so
+     * [get] can report its own "still challenged" error instead of a
+     * confusing FlareSolverr-shaped one.
+     *
+     * Two things are carried back out of the solution, and both matter:
+     * the cookies (a fresh `cf_clearance`) *and* the User-Agent the browser
+     * used. Taking only the cookies - which is what this did before - leaves
+     * them unusable, because Cloudflare ties the clearance cookie to the UA
+     * that earned it. See [userAgent].
+     *
+     * Runs inside a reused browser session where possible, so the cost is
+     * one navigation rather than a full Chrome start-up and teardown.
      */
     private fun solveWithFlareSolverr(url: String): String? {
         val endpoint = flareSolverrUrl ?: return null
-        return try {
-            logger.info("$sourceName: still challenged after $MAX_FETCH_ATTEMPTS attempts, falling back to FlareSolverr for $url")
-            val requestBody = flareSolverrJson.encodeToString(
-                FlareSolverrRequest.serializer(),
-                FlareSolverrRequest(cmd = "request.get", url = url, maxTimeout = FLARESOLVERR_TIMEOUT_MS),
-            )
-            val request = HttpRequest.newBuilder(URI.create(endpoint))
-                .header("Content-Type", "application/json")
-                .timeout(Duration.ofMillis(FLARESOLVERR_TIMEOUT_MS + 10_000L))
-                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                .build()
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-            if (response.statusCode() !in 200..299) {
-                logger.warn("$sourceName: FlareSolverr returned HTTP ${response.statusCode()} for $url")
-                return null
-            }
+        logger.info("$sourceName: Cloudflare challenge, falling back to FlareSolverr for $url")
 
-            val parsed = flareSolverrJson.decodeFromString(FlareSolverrResponse.serializer(), response.body())
-            val solution = parsed.solution
-            if (parsed.status != "ok" || solution == null) {
-                logger.warn("$sourceName: FlareSolverr couldn't solve the challenge for $url: ${parsed.message}")
-                return null
-            }
+        val session = ensureSession(endpoint)
+        val solved = requestViaFlareSolverr(endpoint, url, session)
+        if (solved != null) return solved
 
-            mergeFlareSolverrCookies(solution.cookies)
+        // A session that FlareSolverr no longer knows about (it restarted, or
+        // rotated the session on its TTL) fails every request until it is
+        // recreated, so one retry with a fresh session is worth it before
+        // giving up. Without a session there is nothing to recreate, so the
+        // first failure is final.
+        if (session == null) return null
+        logger.info("$sourceName: retrying through a fresh FlareSolverr session")
+        flareSolverrSession = null
+        sessionAttempted = false
+        val retrySession = ensureSession(endpoint)
+        return requestViaFlareSolverr(endpoint, url, retrySession)
+    }
+
+    /** One `request.get`. Null on any failure. */
+    private fun requestViaFlareSolverr(endpoint: String, url: String, session: String?): String? = try {
+        val parsed = postToFlareSolverr(
+            endpoint,
+            FlareSolverrRequest(
+                cmd = "request.get",
+                url = url,
+                maxTimeout = FLARESOLVERR_TIMEOUT_MS,
+                session = session,
+                disableMedia = true,
+            ),
+        )
+        val solution = parsed?.solution
+        if (parsed == null || parsed.status != "ok" || solution == null) {
+            logger.warn("$sourceName: FlareSolverr couldn't solve the challenge for $url: ${parsed?.message ?: "no response"}")
+            null
+        } else {
+            adoptSolution(solution)
             logger.info("$sourceName: FlareSolverr solved the challenge for $url")
             solution.response
+        }
+    } catch (e: Exception) {
+        logger.warn("$sourceName: FlareSolverr fallback failed for $url: $e")
+        null
+    }
+
+    /**
+     * Takes the clearance cookies *and* the User-Agent from a solved page.
+     *
+     * Both or neither: a clearance cookie without its matching UA is worse
+     * than useless, because it looks like it should work and silently does
+     * not.
+     */
+    private fun adoptSolution(solution: FlareSolverrSolution) {
+        mergeFlareSolverrCookies(solution.cookies)
+        val solvedUserAgent = solution.userAgent?.trim()
+        if (!solvedUserAgent.isNullOrEmpty() && solvedUserAgent != userAgent) {
+            logger.info("$sourceName: adopting FlareSolverr's User-Agent so its clearance cookie is accepted")
+            userAgent = solvedUserAgent
+        }
+    }
+
+    /**
+     * The session id to send, creating the session on first use.
+     *
+     * Returns null if sessions are unavailable, in which case callers fall
+     * back to a sessionless request - FlareSolverr then spins up a
+     * throwaway browser per request, which is what this is trying to avoid
+     * but still works.
+     */
+    private fun ensureSession(endpoint: String): String? {
+        flareSolverrSession?.let { return it }
+        if (sessionAttempted) return null
+        sessionAttempted = true
+
+        val name = "custom-repo-$sourceName"
+        val parsed = try {
+            postToFlareSolverr(
+                endpoint,
+                FlareSolverrRequest(
+                    cmd = "sessions.create",
+                    session = name,
+                    sessionTtlMinutes = SESSION_TTL_MINUTES,
+                ),
+            )
         } catch (e: Exception) {
-            logger.warn("$sourceName: FlareSolverr fallback failed for $url: $e")
+            logger.warn("$sourceName: couldn't create a FlareSolverr session ($e) - falling back to per-request browsers")
             null
         }
+
+        if (parsed == null) return null
+
+        if (parsed.status == "ok") {
+            val created = parsed.session ?: name
+            logger.info("$sourceName: using FlareSolverr session '$created' (TTL ${SESSION_TTL_MINUTES}m)")
+            flareSolverrSession = created
+            return created
+        }
+
+        // A session of this name already exists - which is the normal case
+        // for a second process, and exactly what the stable name is for.
+        if (parsed.message.contains("already exists", ignoreCase = true)) {
+            logger.info("$sourceName: reusing existing FlareSolverr session '$name'")
+            flareSolverrSession = name
+            return name
+        }
+
+        logger.warn("$sourceName: FlareSolverr refused to create a session: ${parsed.message}")
+        return null
+    }
+
+    private fun postToFlareSolverr(endpoint: String, body: FlareSolverrRequest): FlareSolverrResponse? {
+        val request = HttpRequest.newBuilder(URI.create(endpoint))
+            .header("Content-Type", "application/json")
+            .timeout(Duration.ofMillis(FLARESOLVERR_TIMEOUT_MS + 10_000L))
+            .POST(
+                HttpRequest.BodyPublishers.ofString(
+                    flareSolverrJson.encodeToString(FlareSolverrRequest.serializer(), body),
+                ),
+            )
+            .build()
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+        if (response.statusCode() !in 200..299) {
+            logger.warn("$sourceName: FlareSolverr returned HTTP ${response.statusCode()} for ${body.cmd}")
+            return null
+        }
+        return flareSolverrJson.decodeFromString(FlareSolverrResponse.serializer(), response.body())
     }
 
     private fun mergeFlareSolverrCookies(cookies: List<FlareSolverrCookie>) {
@@ -256,6 +422,27 @@ abstract class ScraperClient(
                 version = 0
             }
             cookieManager.cookieStore.add(URI("https://$domain${cookie.path}"), httpCookie)
+        }
+    }
+
+    /**
+     * Whether this client already holds a Cloudflare clearance cookie that
+     * covers [url]'s host.
+     *
+     * Used by the subclasses to skip their "warm-up" page fetch. That
+     * warm-up exists to look like a browser that navigated to the feed
+     * rather than one that arrived cold, but it is a whole extra page fetch
+     * per app per sweep - and while a challenge is in force, a whole extra
+     * headless-browser solve. Once clearance is held there is nothing to warm
+     * up, so the request is pure cost.
+     */
+    protected fun hasClearance(url: String): Boolean {
+        val host = runCatching { URI(url).host }.getOrNull()?.lowercase() ?: return false
+        return cookieManager.cookieStore.cookies.any { cookie ->
+            if (!cookie.name.equals(CLEARANCE_COOKIE, ignoreCase = true)) return@any false
+            if (cookie.hasExpired()) return@any false
+            val domain = cookie.domain?.removePrefix(".")?.lowercase() ?: return@any false
+            host == domain || host.endsWith(".$domain")
         }
     }
 
@@ -338,11 +525,22 @@ abstract class ScraperClient(
         // APKPure (HTML listing pages, RSS feeds, and download pages alike).
         private val CLOUDFLARE_CHALLENGE_RE = Regex("""<title>Just a moment\.\.\.</title>|_cf_chl_opt|challenges\.cloudflare\.com""")
 
-        private const val MAX_FETCH_ATTEMPTS = 1
         private const val DOWNLOAD_ATTEMPTS = 2
-        private const val BASE_RETRY_DELAY_MS = 1_500L
-        private const val MAX_RETRY_DELAY_MS = 8_000L
-        private const val JITTER_MS = 750L
+
+        /**
+         * How long FlareSolverr keeps our browser session before rotating
+         * it. Comfortably longer than a patch sweep so one sweep does not
+         * lose its clearance halfway through, and short enough that a
+         * session wedged by a site change clears itself out without anyone
+         * intervening. FlareSolverr rotates expired sessions itself, so
+         * nothing here has to destroy them - which matters because this
+         * process may be killed at any time (the patch worker is a
+         * short-lived JVM).
+         */
+        private const val SESSION_TTL_MINUTES = 60
+
+        /** Cloudflare's clearance cookie, which is what a solve earns. */
+        private const val CLEARANCE_COOKIE = "cf_clearance"
 
         // How long FlareSolverr itself is allowed to spend solving a single
         // challenge (its own internal timeout, in ms) - a real headless

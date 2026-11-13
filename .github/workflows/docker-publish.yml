@@ -3,6 +3,10 @@ name: Build and Publish Docker Image
 on:
   push:
     branches: [ "main" ]
+    # Immutable version tags. Pushing `v1.2.3` publishes :v1.2.3, :v1.2 and
+    # :v1 alongside :main, so the homelab quadlet can pin a tag that never
+    # moves and roll back by editing one line. See docs/integration-spec.md.
+    tags: [ "v*.*.*" ]
   pull_request:
     branches: [ "main" ]
 
@@ -62,6 +66,15 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `type=sha` gives every build a pinnable :sha-<short> tag; the
+          # semver rules only fire on a v* tag push, and `main` keeps being
+          # the moving tag that `podman auto-update` follows.
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=sha,prefix=sha-,format=short
 
       - name: Build and push image by digest
         id: build
@@ -115,10 +128,50 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Builds the image for this runner's architecture only, loads it into the
+  # local daemon, and exercises it. This is the job that would have caught the
+  # change this slim-down nearly shipped: moving the runtime to a `-jre` base
+  # removes `jar`/`jarsigner`, which breaks index signing at publish time -
+  # not at start-up - so the container still goes healthy and auto-update
+  # still promotes it, while clients quietly stop seeing updates.
+  #
+  # It runs on pull requests as well as pushes, deliberately: catching it
+  # after the image is published to :main is too late.
+  smoke-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image for testing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: custom-repo:smoke-test
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=linux-amd64
+          build-args: |
+            GITHUB_ACTOR=${{ github.actor }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+
+      - name: Smoke test
+        run: ./scripts/smoke-test.sh custom-repo:smoke-test
+
   # Combines the per-arch digests into one tagged manifest list, so
   # `docker pull`/`container pull` of a tag resolves to the right architecture.
   merge:
-    needs: build
+    needs: [build, smoke-test]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -148,6 +201,15 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `type=sha` gives every build a pinnable :sha-<short> tag; the
+          # semver rules only fire on a v* tag push, and `main` keeps being
+          # the moving tag that `podman auto-update` follows.
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=sha,prefix=sha-,format=short
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
