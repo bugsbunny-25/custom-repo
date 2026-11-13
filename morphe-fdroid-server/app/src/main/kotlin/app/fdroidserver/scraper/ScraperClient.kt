@@ -135,34 +135,52 @@ abstract class ScraperClient(
     }
 
     /**
-     * Fetches [url], retrying with backoff if the site serves a Cloudflare
-     * "managed challenge" interstitial (the `Just a moment...` page). A plain
-     * HTTP client can't execute the challenge's JS/proof-of-work, so retrying
-     * can't force a pass the way a real browser would - once retries are
-     * exhausted, [solveWithFlareSolverr] is tried as a last resort if
-     * configured; only if that also comes up empty do we raise a distinct,
-     * actionable error instead of quietly returning (or worse, parsing) the
+     * Fetches [url].
+     *
+     * A Cloudflare "managed challenge" interstitial (the `Just a moment...`
+     * page) hands straight over to [solveWithFlareSolverr]: a plain HTTP
+     * client cannot execute the challenge's JS, so retrying it is futile.
+     * Only if that also comes up empty do we raise a distinct, actionable
+     * error rather than quietly returning (or worse, parsing) the
      * interstitial HTML as if it were the real page.
+     *
+     * A *transport-level* failure is different, and is retried once. An
+     * upstream session proxy that has expired its session answers with
+     * something like `410 Gone`, and the next request through it gets a
+     * fresh session and succeeds. APKMirror's flow happened to survive that
+     * by accident - its warm-up request absorbed the stale-session response
+     * inside a `runCatching` and the feed request that followed went
+     * through - while APKPure's single `get` for the versions page had no
+     * second chance and failed the whole version check (seen on Prime
+     * Video). Putting the retry here, in the shared path, makes the two
+     * symmetric by construction instead of leaving it to whichever client
+     * happens to make two requests.
      */
     protected fun get(url: String, referer: String? = null): String {
-        val request = requestBuilder(url, referer).GET().build()
-        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+        var lastStatus = -1
+        for (attempt in 1..TRANSPORT_ATTEMPTS) {
+            val request = requestBuilder(url, referer).GET().build()
+            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
 
-        if (isCloudflareChallenge(response)) {
-            return solveWithFlareSolverr(url) ?: error(
-                "$sourceName: blocked by a Cloudflare challenge fetching $url" +
-                    if (flareSolverrUrl == null) {
-                        " (no FlareSolverr configured - set one in Settings)"
-                    } else {
-                        " (FlareSolverr fallback also failed)"
-                    },
-            )
-        }
+            if (isCloudflareChallenge(response)) {
+                return solveWithFlareSolverr(url) ?: error(
+                    "$sourceName: blocked by a Cloudflare challenge fetching $url" +
+                        if (flareSolverrUrl == null) {
+                            " (no FlareSolverr configured - set one in Settings)"
+                        } else {
+                            " (FlareSolverr fallback also failed)"
+                        },
+                )
+            }
 
-        if (response.statusCode() !in 200..299) {
-            error("HTTP ${response.statusCode()} fetching $url")
+            if (response.statusCode() in 200..299) return response.body()
+
+            lastStatus = response.statusCode()
+            if (lastStatus !in RETRYABLE_STATUSES || attempt == TRANSPORT_ATTEMPTS) break
+            logger.info("$sourceName: HTTP $lastStatus fetching $url - retrying once (likely an expired upstream session)")
+            Thread.sleep(TRANSPORT_RETRY_DELAY_MS)
         }
-        return response.body()
+        error("HTTP $lastStatus fetching $url")
     }
 
     /** Detects Cloudflare's interstitial rather than the real page: either
@@ -526,6 +544,29 @@ abstract class ScraperClient(
         private val CLOUDFLARE_CHALLENGE_RE = Regex("""<title>Just a moment\.\.\.</title>|_cf_chl_opt|challenges\.cloudflare\.com""")
 
         private const val DOWNLOAD_ATTEMPTS = 2
+
+        /**
+         * Attempts for a page fetch that fails at the transport level. Two,
+         * not more: the case this exists for is a one-shot stale session,
+         * where the retry either works immediately or the status is telling
+         * the truth.
+         */
+        private const val TRANSPORT_ATTEMPTS = 2
+        private const val TRANSPORT_RETRY_DELAY_MS = 1_000L
+
+        /**
+         * Statuses worth one more try.
+         *
+         * 410 is the important one and the reason this exists: HTTP says
+         * "permanently gone", but session proxies in front of these sites use
+         * it for "your session expired", and the next request gets a new one.
+         * 408/425/429 and the 5xx gateway family are the ordinary transient
+         * set. 403 and 404 are deliberately absent - a retry there is just a
+         * second helping of the same answer, and 403 in particular is how
+         * Cloudflare says no to a cookieless request, which needs a solve
+         * rather than a repeat.
+         */
+        private val RETRYABLE_STATUSES = setOf(408, 410, 425, 429, 500, 502, 503, 504)
 
         /**
          * How long FlareSolverr keeps our browser session before rotating

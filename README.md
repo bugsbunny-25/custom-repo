@@ -546,10 +546,22 @@ The practical consequence of the allowlist: **a new public directory under
 | `tmp/`, `patched/tmp/`, `patched-tv/tmp/` | deleted after every successful run | downloads, bundle merges, patch scratch |
 
 `ARCHIVE_KEEP` keeps the newest N versions **per app** and deletes the rest,
-then refreshes the index of any repo it changed. It ranks by the version code
-in F-Droid's own `packageName_versionCode.apk` filename, numerically — a file
-that does not match that pattern is left alone rather than guessed at. Set
-`ARCHIVE_KEEP=0` to disable pruning entirely.
+then refreshes the index of any repo it changed. Set `ARCHIVE_KEEP=0` to
+disable pruning entirely.
+
+It identifies each file from **`archive/index-v1.json`**, not from the
+filename. That matters here: GitHub release assets are stored as
+`{releaseId}-{assetName}.apk` and patched builds as
+`{targetId}__{patchId}__{version}.apk`, and neither carries a package name or
+a version code. `fdroid update` builds the index by reading each APK, so it is
+authoritative for any naming scheme. Two consequences worth knowing:
+
+- **A fresh archive prunes nothing on its first pass.** Until `fdroid update`
+  has written `archive/index-v1.json`, there is nothing to attribute the files
+  to, and the prune logs that and deletes nothing rather than guessing.
+- A file sitting in `archive/` that the index does not list is left alone and
+  counted in the log — usually a leftover mid-write, or one added since the
+  last index build.
 
 Deleting archived versions is the one change here that clients can see: they
 lose the ability to install versions older than the newest N from the archive

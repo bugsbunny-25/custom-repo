@@ -5,6 +5,12 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.Yaml
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /**
  * Thin wrapper around the external `fdroid` CLI (from the `fdroidserver`
@@ -183,6 +189,9 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
         }
     }
 
+    /** What the repo index says a given APK file is. */
+    internal data class ArchiveEntry(val packageName: String, val versionCode: Long)
+
     /**
      * Bounds the `archive/` directory to the newest [keep] versions per app.
      *
@@ -193,12 +202,30 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
      * and patched builds), so a bound is safe; what is not safe is losing the
      * *newest* versions, hence keep-newest-N rather than delete-older-than-N.
      *
-     * Archive filenames are F-Droid's own `packageName_versionCode.apk`
-     * shape, which is why this cannot reuse [pruneOldVersions] - that ranks
-     * dotted version *names* out of this project's own
-     * `{targetId}__{patchId}__{version}.apk` naming. Here the trailing
-     * integer is the version code and sorts numerically; a file that does not
-     * match the pattern is left alone rather than guessed at.
+     * **The app and version come from the repo's own index, not the
+     * filename.** An earlier version of this parsed F-Droid's canonical
+     * `packageName_versionCode.apk` shape, which was simply wrong for this
+     * repo: GitHub release assets are stored under their release id and
+     * original asset name (`273373805-findroid-v1.0.0-....apk`, see
+     * `GithubScheduler.assetFile`) and patched builds under
+     * `{targetId}__{patchId}__{version}.apk`. Neither carries a package name
+     * or a version code, so every file failed to parse, the prune skipped all
+     * 180 of them, and the 16 GB stayed exactly where it was. It failed
+     * safely - it deleted nothing - but it also did nothing.
+     *
+     * `archive/index-v1.json` already holds the mapping, because `fdroid
+     * update` builds it by reading each APK rather than by trusting its name.
+     * That makes it authoritative for any naming scheme, including ones this
+     * project does not control.
+     *
+     * Deliberately conservative in two ways:
+     *  - no index, or an unreadable one, deletes nothing. The index is the
+     *    only thing that knows what these files are; guessing is how you
+     *    delete the wrong APK.
+     *  - a file on disk that the index does not mention is left alone and
+     *    counted in the log. It is usually a leftover mid-write or a file
+     *    added since the last `fdroid update`, and in either case we cannot
+     *    attribute it.
      *
      * Each removed APK's sidecar files (`.asc` signatures, and the
      * `_src.tar.gz` sources F-Droid writes next to an APK) go with it, since
@@ -216,24 +243,30 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
         if (!archiveDir.isDirectory) return 0
 
         val apks = archiveDir.listFiles { f -> f.isFile && f.extension == "apk" } ?: return 0
-        // packageName_versionCode.apk -> (packageName, versionCode)
-        val parsed = apks.mapNotNull { file ->
-            val stem = file.nameWithoutExtension
-            val code = stem.substringAfterLast('_', "").toLongOrNull() ?: return@mapNotNull null
-            val pkg = stem.substringBeforeLast('_', "")
-            if (pkg.isEmpty()) null else Triple(file, pkg, code)
+        if (apks.isEmpty()) return 0
+
+        val index = readArchiveIndex(archiveDir)
+        if (index == null) {
+            logger.warn(
+                "Archive prune in $archiveDir: no readable index (index-v1.json / index-v2.json), so the " +
+                    "${apks.size} APK(s) there cannot be attributed to an app - deleting nothing. " +
+                    "Run `fdroid update` in ${repoDir.absolutePath} and the next run will prune.",
+            )
+            return 0
         }
-        val unparsed = apks.size - parsed.size
-        if (unparsed > 0) {
-            logger.info("Archive prune in $archiveDir: leaving $unparsed file(s) alone - name is not packageName_versionCode.apk")
+
+        val known = apks.mapNotNull { file -> index[file.name]?.let { file to it } }
+        val unknown = apks.size - known.size
+        if (unknown > 0) {
+            logger.info("Archive prune in $archiveDir: leaving $unknown file(s) alone - not listed in the archive index")
         }
 
         var deleted = 0
-        for ((pkg, entries) in parsed.groupBy { it.second }) {
-            val sorted = entries.sortedByDescending { it.third }
+        for ((pkg, entries) in known.groupBy { it.second.packageName }) {
+            val sorted = entries.sortedByDescending { it.second.versionCode }
             if (sorted.size <= keep) continue
-            for ((file, _, code) in sorted.drop(keep)) {
-                logger.info("Archive prune: removing $pkg version code $code (${file.name})")
+            for ((file, entry) in sorted.drop(keep)) {
+                logger.info("Archive prune: removing $pkg version code ${entry.versionCode} (${file.name})")
                 if (file.delete()) {
                     deleted++
                     deleteSidecars(file)
@@ -246,6 +279,68 @@ class FdroidRepoManager(private val logger: Logger = LoggerFactory.getLogger(Fdr
             logger.info("Archive prune in $archiveDir: removed $deleted APK(s), keeping newest $keep per app")
         }
         return deleted
+    }
+
+    /**
+     * Maps APK file name -> (package, version code) from the archive's own
+     * index. Returns null when no index could be read at all, which is
+     * distinct from an index that is readable but lists nothing.
+     *
+     * index-v1 is tried first because `fdroid update` always writes it, and
+     * its shape is flat: `packages[pkg]` is a list of entries carrying
+     * `apkName` and `versionCode`. index-v2 is the fallback, where the same
+     * facts live under `packages[pkg].versions[hash].file.name` (a
+     * repo-relative path, so only its last segment is the file name) and
+     * `.manifest.versionCode`.
+     */
+    internal fun readArchiveIndex(archiveDir: File): Map<String, ArchiveEntry>? {
+        parseIndexV1(File(archiveDir, "index-v1.json"))?.let { return it }
+        parseIndexV2(File(archiveDir, "index-v2.json"))?.let { return it }
+        return null
+    }
+
+    private fun parseIndexV1(file: File): Map<String, ArchiveEntry>? {
+        if (!file.isFile) return null
+        return try {
+            val packages = Json.parseToJsonElement(file.readText())
+                .jsonObject["packages"]?.jsonObject ?: return emptyMap()
+            val result = mutableMapOf<String, ArchiveEntry>()
+            for ((pkg, versions) in packages) {
+                for (entry in versions.jsonArray) {
+                    val obj = entry.jsonObject
+                    val apkName = obj["apkName"]?.jsonPrimitive?.contentOrNull ?: continue
+                    val versionCode = obj["versionCode"]?.jsonPrimitive?.longOrNull ?: continue
+                    result[apkName] = ArchiveEntry(pkg, versionCode)
+                }
+            }
+            result
+        } catch (e: Exception) {
+            logger.warn("Could not parse ${file.name}: $e")
+            null
+        }
+    }
+
+    private fun parseIndexV2(file: File): Map<String, ArchiveEntry>? {
+        if (!file.isFile) return null
+        return try {
+            val packages = Json.parseToJsonElement(file.readText())
+                .jsonObject["packages"]?.jsonObject ?: return emptyMap()
+            val result = mutableMapOf<String, ArchiveEntry>()
+            for ((pkg, pkgObj) in packages) {
+                val versions = pkgObj.jsonObject["versions"]?.jsonObject ?: continue
+                for ((_, version) in versions) {
+                    val obj = version.jsonObject
+                    val path = obj["file"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull ?: continue
+                    val versionCode = obj["manifest"]?.jsonObject?.get("versionCode")?.jsonPrimitive?.longOrNull
+                        ?: continue
+                    result[path.substringAfterLast('/')] = ArchiveEntry(pkg, versionCode)
+                }
+            }
+            result
+        } catch (e: Exception) {
+            logger.warn("Could not parse ${file.name}: $e")
+            null
+        }
     }
 
     /** Removes the files F-Droid writes alongside an APK, if present. */
