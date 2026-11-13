@@ -59,8 +59,17 @@ class ApkMirrorClient(
      * cookies/referer to go through.
      */
     override fun getVersions(appUrl: String): List<VersionEntry> {
-        runCatching { get(appUrl) }.onFailure {
-            logger.debug("apkmirror: warm-up request to $appUrl failed, fetching feed directly instead: $it")
+        // Skipped once we already hold clearance for this host: the warm-up
+        // only exists to make the feed request look like a continuation of a
+        // browsing session, and with clearance in hand it is one more page
+        // fetch - and, while challenged, one more headless-browser solve -
+        // per app per sweep, for nothing.
+        if (hasClearance(appUrl)) {
+            logger.debug("apkmirror: clearance already held for $appUrl, skipping the warm-up request")
+        } else {
+            runCatching { get(appUrl) }.onFailure {
+                logger.debug("apkmirror: warm-up request to $appUrl failed, fetching feed directly instead: $it")
+            }
         }
 
         val url = appUrl.trimEnd('/') + "/feed/"

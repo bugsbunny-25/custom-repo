@@ -249,7 +249,14 @@ probe_status() {
     $RUNTIME exec "$cid" sh -c "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1$1" 2>/dev/null || echo "000"
 }
 
+# A repo path is only asserted when the data directory actually has it -
+# pointing --data at a single sub-repo (e.g. .../fdroid-data/patched) is a
+# legitimate thing to do, and it should not look like a serving regression.
 for path in /repo/ /patched/repo/ /patched-tv/repo/ /admin; do
+    if [ "$path" != "/admin" ] && [ ! -d "$WORK/data/${path#/}" ]; then
+        note "$path skipped - not present in the data directory"
+        continue
+    fi
     code="$(probe_status "$path")"
     case "$code" in
         200|301|302) ok "$path is served ($code)" ;;

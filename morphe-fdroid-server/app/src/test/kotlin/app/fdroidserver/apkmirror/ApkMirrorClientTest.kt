@@ -353,13 +353,21 @@ class ApkMirrorClientTest {
     @Test
     fun `falls back to FlareSolverr when persistently challenged, and its cookies clear the challenge on later requests`() {
         val feedHost = "127.0.0.1"
+        // Only the page solves are counted. A `sessions.create` now precedes
+        // them - the client reuses one browser instance instead of letting
+        // FlareSolverr launch and destroy Chrome per request - and that is
+        // setup, not work.
         var flareSolverrRequests = 0
         val flareSolverr = startFlareSolverrServer { requestBody ->
-            flareSolverrRequests++
-            assertTrue(requestBody.contains(""""cmd":"request.get""""))
-            val encodedFeedXml = Json.encodeToString(disneyFeedXml)
-            """{"status":"ok","solution":{"response":$encodedFeedXml,"cookies":[""" +
-                """{"name":"cf_clearance","value":"solved-token","domain":"$feedHost","path":"/"}]}}"""
+            if (requestBody.contains(""""cmd":"sessions.create"""")) {
+                """{"status":"ok","message":"Session created successfully.","session":"custom-repo-apkmirror"}"""
+            } else {
+                flareSolverrRequests++
+                assertTrue(requestBody.contains(""""cmd":"request.get""""))
+                val encodedFeedXml = Json.encodeToString(disneyFeedXml)
+                """{"status":"ok","solution":{"response":$encodedFeedXml,"cookies":[""" +
+                    """{"name":"cf_clearance","value":"solved-token","domain":"$feedHost","path":"/"}]}}"""
+            }
         }
 
         val apkMirror = HttpServer.create(InetSocketAddress(feedHost, 0), 0)
@@ -386,6 +394,8 @@ class ApkMirrorClientTest {
             // cookieManager already holds the cookie FlareSolverr returned, so
             // the feed request should pass on its own this time - confirming
             // the merge actually benefits later requests, not just this one.
+            // (The warm-up request is also skipped now that clearance is
+            // held for this host - see ScraperClient.hasClearance.)
             val secondCall = client.getVersions(appUrl)
             assertEquals("26.11.0+rc3-2026.06.24", secondCall.first().version)
             assertEquals(1, flareSolverrRequests)

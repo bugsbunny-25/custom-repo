@@ -562,6 +562,70 @@ scarcer than disk. Published APKs are never deleted by this cleanup; note that
 `patched/` and `patched-tv/` are *repositories*, not scratch directories,
 despite the names.
 
+## Cloudflare and FlareSolverr
+
+APKMirror and APKPure are both fronted by Cloudflare and both serve the
+`Just a moment...` managed-challenge interstitial. A plain HTTP client cannot
+execute that challenge's JavaScript, so there is no retry that clears it -
+the only thing that does is a real browser. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr)
+is that browser, run as a sidecar; set its URL on the Settings page
+(`http://flaresolverr:8191/v1`) and it is used as a **last resort** when a
+fetch comes back challenged.
+
+"Last resort" is the intent, and it now holds. It did not before: a solve
+returns both a `cf_clearance` cookie and the User-Agent the browser used, and
+Cloudflare ties the cookie to that UA — FlareSolverr's own README says so —
+but only the cookie was being kept. The clearance was therefore rejected on
+the very next request, so *every* page fetch was challenged and *every* one
+paid for a fresh headless-browser solve. On one real deployment that was
+~1100 FlareSolverr calls a day and sustained CPU spikes on the sidecar. The
+giveaway was that nothing looked broken: pages were returned, nothing errored.
+
+What the client does now:
+
+- **Adopts the solved User-Agent** along with the cookies, so one solve covers
+  the whole clearance window instead of one request.
+- **Reuses one browser session** (`sessions.create`, 60-minute TTL, named
+  `custom-repo-<source>`). FlareSolverr otherwise launches and destroys Chrome
+  per request, which is where the CPU goes. The name is stable rather than
+  random so a patch worker — a separate, short-lived JVM — lands on the
+  session the previous one already has clearance in. If FlareSolverr refuses
+  sessions, it falls back to per-request browsers and logs it once.
+- **Sends `disableMedia`**, skipping images, CSS and fonts. Nothing here
+  parses them.
+- **Skips the warm-up fetch** once clearance is held for that host. Each
+  `getVersions` otherwise fetches the app page purely to look like a browser
+  that navigated to the feed, which while challenged doubled the bill.
+
+### How many calls to expect
+
+Steady-state scraping is roughly:
+
+```
+2 fetches per getVersions  x  (watched apps x sources)  x  cycles per day
+```
+
+APKMirror is always consulted; APKPure only when a needed version is missing
+from the APKMirror feed and the app has an APKPure URL. Mobile and TV sweep
+independently. With clearance working, only a small fraction of those fetches
+should reach FlareSolverr — roughly one per site per clearance window.
+
+GitHub release checks do **not** use FlareSolverr at all; they go through the
+GitHub API.
+
+### Turning the load down further
+
+- **Lengthen the patch interval.** Settings → "Check apps to patch every".
+  It is in seconds, minimum 60, no maximum — `28800` is 8 hours. Leave it
+  blank and it inherits the GitHub interval, which is probably not what you
+  want; set it explicitly. The GitHub interval can stay short, since it costs
+  FlareSolverr nothing.
+- **Manual actions are unaffected** by the interval: "Patch now", "Patch all",
+  "Patch specific version" and "Check now" are separate endpoints and always
+  run on demand.
+- Give FlareSolverr itself a CPU limit if the spikes matter more than
+  latency — a slower solve is better than a starved host.
+
 ## Configuration Options
 
 Everything below is configured from the admin UI at `/admin` (Settings page
