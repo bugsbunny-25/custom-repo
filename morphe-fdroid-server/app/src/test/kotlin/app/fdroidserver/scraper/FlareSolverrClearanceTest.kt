@@ -234,4 +234,78 @@ class FlareSolverrClearanceTest {
 
         assertFalse(client.clearanceHeldFor("https://example.com/app"))
     }
+
+    // -----------------------------------------------------------------------
+    // Transport-level retry
+    // -----------------------------------------------------------------------
+    // A session proxy in front of these sites answers an expired session with
+    // 410, and the next request through it gets a fresh one. APKMirror used to
+    // survive that by accident (its warm-up request absorbed the failure
+    // inside a runCatching, and the feed request that followed succeeded)
+    // while APKPure's single fetch for the versions page had no second chance
+    // and failed the whole version check. The retry lives in the shared get()
+    // so both are covered by construction.
+
+    @Test
+    fun `a 410 from an expired upstream session is retried once and recovers`() {
+        val attempts = AtomicInteger()
+        site.createContext("/") { exchange ->
+            if (attempts.incrementAndGet() == 1) {
+                val body = "session expired".toByteArray()
+                exchange.sendResponseHeaders(410, body.size.toLong())
+                exchange.responseBody.use { it.write(body) }
+            } else {
+                respond(exchange, "<html>real page</html>")
+            }
+        }
+
+        val client = TestClient(null)
+        assertEquals("<html>real page</html>", client.fetch(siteUrl("/versions")).trim())
+        assertEquals(2, attempts.get(), "the first 410 should be retried exactly once")
+    }
+
+    @Test
+    fun `a persistent 410 still fails, reporting the status`() {
+        site.createContext("/") { exchange ->
+            val body = "gone".toByteArray()
+            exchange.sendResponseHeaders(410, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+
+        val error = runCatching { TestClient(null).fetch(siteUrl("/versions")) }.exceptionOrNull()
+        assertTrue(error?.message?.contains("HTTP 410") == true, "got: ${error?.message}")
+    }
+
+    @Test
+    fun `a 404 is not retried`() {
+        // Retrying a genuine "not found" just buys the same answer twice, and
+        // doubles the load on a site that is already rate-limiting us.
+        val attempts = AtomicInteger()
+        site.createContext("/") { exchange ->
+            attempts.incrementAndGet()
+            val body = "nope".toByteArray()
+            exchange.sendResponseHeaders(404, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+
+        runCatching { TestClient(null).fetch(siteUrl("/missing")) }
+        assertEquals(1, attempts.get(), "a 404 should be taken at its word")
+    }
+
+    @Test
+    fun `a 503 is retried once`() {
+        val attempts = AtomicInteger()
+        site.createContext("/") { exchange ->
+            if (attempts.incrementAndGet() == 1) {
+                val body = "busy".toByteArray()
+                exchange.sendResponseHeaders(503, body.size.toLong())
+                exchange.responseBody.use { it.write(body) }
+            } else {
+                respond(exchange, "<html>ok</html>")
+            }
+        }
+
+        assertEquals("<html>ok</html>", TestClient(null).fetch(siteUrl("/x")).trim())
+        assertEquals(2, attempts.get())
+    }
 }

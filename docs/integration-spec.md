@@ -94,6 +94,17 @@ answering while the JVM behind `/admin` and `/api/` is wedged, so an image
 whose app is broken would previously have looked healthy and never been
 rolled back.
 
+> **If you added a `HealthCmd=` to the quadlet as a workaround, you can drop
+> it.** The first published image carried its health check in the registry but
+> Podman ignored it, because Buildx pushed OCI media types and the OCI image
+> config spec has no `Healthcheck` field
+> ([containers/podman#18904](https://github.com/containers/podman/issues/18904)).
+> The image is now published with Docker media types, and CI fails the publish
+> if the manifests are not Docker-typed or the health check is missing — so
+> `podman inspect fdroid-repo --format '{{json .Config.Healthcheck}}'` should
+> show it rather than `null`. Keeping the quadlet's own `HealthCmd` is
+> harmless if you prefer it; it just overrides the image's.
+
 **PID 1 is now the JVM, not supervisord.** supervisord was removed. If the
 JVM dies the container exits and podman restarts or rolls back; if nginx dies
 the HEALTHCHECK fails. Consequence for you: **the app's log is no longer at
@@ -470,6 +481,12 @@ Once satisfied, exclude `$D` from the backup job and keep backing up only
 `ARCHIVE_KEEP=3` (the default) prunes `archive/` on the next run, which is
 where most of the 16 GB goes. It is applied by a builder run, or by the
 all-in-one container's patch loop.
+
+The prune reads `archive/index-v1.json` to work out which app and version each
+file is, because the filenames here (`{releaseId}-{assetName}.apk` for GitHub
+assets) carry neither. If that index does not exist yet, the run logs that and
+deletes nothing — so if the first pass reclaims nothing, check for the index
+and let one `fdroid update` complete first.
 
 To see what it would do before letting it run, set `ARCHIVE_KEEP=0` (disables
 pruning) and count:

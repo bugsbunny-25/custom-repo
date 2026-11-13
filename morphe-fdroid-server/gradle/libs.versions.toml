@@ -1,25 +1,25 @@
 [versions]
-kotlin = "2.4.10"
-ktor = "3.5.2"
-kotlinx-serialization = "1.11.0"
+kotlin = "2.4.21"
+ktor = "3.6.1"
+kotlinx-serialization = "1.13.0"
 kotlinx-coroutines = "1.11.0"
-snakeyaml = "2.6"
+snakeyaml = "2.7"
 # Bumped together as a coupled pair (see original comment history):
 # Exposed 1.x introduces the org.jetbrains.exposed.v1.* package layout
 # (v1.core.* for table/column/expression types, v1.jdbc.* for Database,
 # SchemaUtils, transaction and the DML extension functions). All three
 # call-sites (AppConfig.kt, AppDatabase.kt, Schema.kt) were migrated in lock
 # step. sqlite-jdbc was also bumped to the current release at the same time.
-sqlite-jdbc = "3.53.2.0"
-exposed = "1.1.1"
-jsoup = "1.23.1"
+sqlite-jdbc = "3.54.1.0"
+exposed = "1.6.1"
+jsoup = "1.24.1"
 # logback 1.6.x is a drop-in replacement for 1.5.x and works with SLF4J 2.0.x
 # (the note about needing 2.1.x was incorrect - see logback.qos.ch/news.html).
 # Our logback.xml uses no Janino conditionals so no config migration is needed.
-logback = "1.6.1"
-slf4j = "2.0.18"
-junit = "6.1.2"
-mockk = "1.14.11"
+logback = "1.6.6"
+slf4j = "2.0.20"
+junit = "6.1.3"
+mockk = "1.14.12"
 # Pinned to the exact version morphe-desktop main currently depends on
 # (confirmed against its gradle/libs.versions.toml at tag v2.1.1, the commit
 # recorded in app/src/main/kotlin/app/morphe/engine/FORK_INFO). The vendored

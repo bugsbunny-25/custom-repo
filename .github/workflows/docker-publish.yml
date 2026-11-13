@@ -86,7 +86,16 @@ jobs:
           # push-by-digest: publish the per-arch image with no tag of its own,
           # returning its digest for the merge job. name-canonical keeps the
           # image's own name field pointing at the canonical repository.
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          # oci-mediatypes=false is load-bearing, not cosmetic. Buildx
+          # pushes OCI media types by default, and the OCI image config spec
+          # has no Healthcheck field - so although BuildKit does write the
+          # HEALTHCHECK into the config blob, Podman parses an OCI-typed
+          # image through a struct that has nowhere to put it and drops it.
+          # The result is a published image whose health check exists in the
+          # registry and is invisible to the runtime that pulls it
+          # (containers/podman#18904), which is why the quadlet needed its
+          # own HealthCmd as a workaround. Docker media types keep it.
+          outputs: type=image,oci-mediatypes=false,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           # Buildx attaches provenance/SBOM attestations by default, each
           # pushed as its own manifest referenced by digest (sha256-<digest>)
           # rather than by the tags above - disable both so GHCR's tag list
@@ -222,3 +231,50 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+      # The HEALTHCHECK is what lets `podman auto-update` reject an image
+      # whose app starts but does not work, so "it is in the Dockerfile" is
+      # not enough - it has to survive being published. This asserts it is
+      # actually present in the pushed per-platform config, and that the
+      # manifests are Docker-typed, since an OCI-typed image is exactly the
+      # case where Podman silently ignores it.
+      - name: Verify the published image kept its HEALTHCHECK
+        run: |
+          set -euo pipefail
+          ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+
+          # Asserting media types, not just the presence of the field. The
+          # config blob keeps Healthcheck either way - it was verified
+          # present on an OCI-typed image that Podman nonetheless ignored -
+          # so "the field is there" proves nothing on its own. Docker-typed
+          # manifests are what make the runtime read it.
+          raw=$(docker buildx imagetools inspect "$ref" --raw)
+          media=$(jq -r '.mediaType' <<<"$raw")
+          echo "index mediaType: $media"
+          if [ "$media" != "application/vnd.docker.distribution.manifest.list.v2+json" ]; then
+            echo "::error::index is $media, not a Docker manifest list - Podman will drop the HEALTHCHECK"
+            exit 1
+          fi
+          bad=$(jq -r '[.manifests[] | select(.mediaType != "application/vnd.docker.distribution.manifest.v2+json") | .mediaType] | join(", ")' <<<"$raw")
+          if [ -n "$bad" ]; then
+            echo "::error::non-Docker per-platform manifest(s): $bad"
+            exit 1
+          fi
+
+          # One entry per platform; every one must declare a health check.
+          configs=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}')
+          missing=0
+          for platform in $(jq -r 'if has("config") then "single" else keys[] end' <<<"$configs"); do
+            if [ "$platform" = "single" ]; then
+              test_cmd=$(jq -r '.config.Healthcheck.Test // empty' <<<"$configs")
+            else
+              test_cmd=$(jq -r --arg p "$platform" '.[$p].config.Healthcheck.Test // empty' <<<"$configs")
+            fi
+            if [ -z "$test_cmd" ]; then
+              echo "::error::$platform: published image has no Healthcheck"
+              missing=1
+            else
+              echo "$platform: Healthcheck present"
+            fi
+          done
+          exit $missing
