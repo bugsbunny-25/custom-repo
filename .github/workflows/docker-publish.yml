@@ -238,43 +238,64 @@ jobs:
       # actually present in the pushed per-platform config, and that the
       # manifests are Docker-typed, since an OCI-typed image is exactly the
       # case where Podman silently ignores it.
+      # The HEALTHCHECK is what lets `podman auto-update` reject an image
+      # whose app starts but does not work, so "it is in the Dockerfile" is
+      # not enough - it has to survive being published.
+      #
+      # Read from the registry, not from `imagetools inspect --format
+      # '{{json .Image}}'`. That output marshals through the OCI image
+      # struct, which has no Healthcheck field, so it reports the field
+      # missing even when the config blob plainly contains it - the exact
+      # same hole that caused the bug this step exists to catch. The config
+      # blob is ground truth.
+      #
+      # Media types are asserted too, and they are the half that actually
+      # matters to Podman: an OCI-typed image keeps Healthcheck in its blob
+      # and still has it ignored at runtime
+      # (containers/podman#18904).
       - name: Verify the published image kept its HEALTHCHECK
         run: |
           set -euo pipefail
-          ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+          repo="${{ env.IMAGE_NAME }}"
+          tag="${{ steps.meta.outputs.version }}"
+          api="https://ghcr.io/v2/$repo"
 
-          # Asserting media types, not just the presence of the field. The
-          # config blob keeps Healthcheck either way - it was verified
-          # present on an OCI-typed image that Podman nonetheless ignored -
-          # so "the field is there" proves nothing on its own. Docker-typed
-          # manifests are what make the runtime read it.
-          raw=$(docker buildx imagetools inspect "$ref" --raw)
-          media=$(jq -r '.mediaType' <<<"$raw")
-          echo "index mediaType: $media"
-          if [ "$media" != "application/vnd.docker.distribution.manifest.list.v2+json" ]; then
-            echo "::error::index is $media, not a Docker manifest list - Podman will drop the HEALTHCHECK"
-            exit 1
-          fi
-          bad=$(jq -r '[.manifests[] | select(.mediaType != "application/vnd.docker.distribution.manifest.v2+json") | .mediaType] | join(", ")' <<<"$raw")
-          if [ -n "$bad" ]; then
-            echo "::error::non-Docker per-platform manifest(s): $bad"
+          token=$(curl -fsSL -u "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "https://ghcr.io/token?scope=repository:$repo:pull&service=ghcr.io" | jq -r .token)
+          auth=(-H "Authorization: Bearer $token")
+          accept=(-H "Accept: application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json")
+
+          index=$(curl -fsSL "${auth[@]}" "${accept[@]}" "$api/manifests/$tag")
+          index_type=$(jq -r '.mediaType' <<<"$index")
+          echo "index mediaType: $index_type"
+          if [ "$index_type" != "application/vnd.docker.distribution.manifest.list.v2+json" ]; then
+            echo "::error::index is $index_type, not a Docker manifest list - Podman will drop the HEALTHCHECK"
             exit 1
           fi
 
-          # One entry per platform; every one must declare a health check.
-          configs=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}')
-          missing=0
-          for platform in $(jq -r 'if has("config") then "single" else keys[] end' <<<"$configs"); do
-            if [ "$platform" = "single" ]; then
-              test_cmd=$(jq -r '.config.Healthcheck.Test // empty' <<<"$configs")
-            else
-              test_cmd=$(jq -r --arg p "$platform" '.[$p].config.Healthcheck.Test // empty' <<<"$configs")
+          failed=0
+          while read -r platform digest; do
+            manifest=$(curl -fsSL "${auth[@]}" "${accept[@]}" "$api/manifests/$digest")
+            m_type=$(jq -r '.mediaType' <<<"$manifest")
+            c_type=$(jq -r '.config.mediaType' <<<"$manifest")
+            c_digest=$(jq -r '.config.digest' <<<"$manifest")
+
+            if [ "$m_type" != "application/vnd.docker.distribution.manifest.v2+json" ]; then
+              echo "::error::$platform: manifest is $m_type, not Docker-typed"
+              failed=1
             fi
+            if [ "$c_type" != "application/vnd.docker.container.image.v1+json" ]; then
+              echo "::error::$platform: config is $c_type, not a Docker image config"
+              failed=1
+            fi
+
+            test_cmd=$(curl -fsSL "${auth[@]}" "$api/blobs/$c_digest" | jq -r '.config.Healthcheck.Test // empty')
             if [ -z "$test_cmd" ]; then
-              echo "::error::$platform: published image has no Healthcheck"
-              missing=1
+              echo "::error::$platform: published config has no Healthcheck"
+              failed=1
             else
-              echo "$platform: Healthcheck present"
+              echo "$platform: Docker-typed, Healthcheck present"
             fi
-          done
-          exit $missing
+          done < <(jq -r '.manifests[] | "\(.platform.os)/\(.platform.architecture) \(.digest)"' <<<"$index")
+
+          exit $failed
