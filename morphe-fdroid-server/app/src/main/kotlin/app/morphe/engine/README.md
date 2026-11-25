@@ -102,7 +102,7 @@ download URLs, and keeps its own catalog in SQLite.
 
 ## Local deltas from upstream
 
-Kept as small as possible so re-syncing stays cheap. Two, as of v2.1.1:
+Kept as small as possible so re-syncing stays cheap. Three, as of v2.3.0:
 
 1. **`PatchEngine.kt` - caller-supplied version filter.** `Config.versionFilter`
    (null by default, which keeps upstream's check) replaces the
@@ -122,7 +122,13 @@ Kept as small as possible so re-syncing stays cheap. Two, as of v2.1.1:
    becomes a no-op for the same reason: taking `app.morphe`'s JUL handlers over
    would cut morphe-patcher's records out of that pipe and feed this logger
    back into itself.
-3. Nothing else. All other files are byte-identical to upstream.
+3. **`PatchEngine.kt` - form factor without the catalog.** v2.3.0 started
+   recording each patched app's `FormFactor` via
+   `SupportedAppCatalog.extractFormFactors`. That object is part of the
+   patch-browsing layer listed above as not vendored, and pulling it in drags
+   `DownloadUrlResolver` and the desktop-only `MorpheConstants` behind it, so
+   `PatchEngine` carries a private copy of the eight-line function instead.
+4. Nothing else. All other files are byte-identical to upstream.
 
 Two deltas were dropped at v1.20.0 because upstream adopted them:
 
@@ -152,7 +158,9 @@ package around:
   out. The reference has to be an import, or a mention from inside the same
   package, which is how a desktop-only file avoids being dragged in by a
   passing mention of a common word. New upstream files nothing here uses are
-  left behind.
+  left behind. References are read *after* the local deltas are re-applied, so
+  a delta that cuts a dependency (like the form-factor one above) keeps the
+  file it cut out of the tree.
 - **Renamed files.** A vendored file with no upstream counterpart at its old
   path, where exactly one upstream file carries that basename, is treated as
   moved: ours is `git mv`d to the new path and refreshed there (v1.20.0 moved

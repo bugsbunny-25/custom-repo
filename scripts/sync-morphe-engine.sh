@@ -110,6 +110,43 @@ if [ ${#moved[@]} -gt 0 ]; then
   emit "moved_files=${moved[*]}"
 fi
 
+# Re-apply the local deltas (see local-deltas/README.md).
+# Deltas go in *before* the pull-in below, so it sees what our code actually
+# references rather than upstream's: v2.3.0's PatchEngine imports the desktop
+# patch-browsing `SupportedAppCatalog`, which a delta replaces with a local
+# helper - judged on the unpatched file, the pull-in dragged the whole catalog
+# (and the desktop-only DownloadUrlResolver behind it) in and the sync PR
+# failed to compile.
+#
+# Not --3way: that needs the patch to carry git blob index lines and the file
+# to still match the index, and neither holds here - these are cross-repo
+# diffs against files this script just overwrote. Exact apply first, then a
+# reduced-context retry (-C1) so a delta still lands when upstream only moved
+# the surrounding lines around.
+delta_status="clean"
+delta_notes=""
+shopt -s nullglob
+for patch in "$LOCAL_ENGINE_DIR"/local-deltas/*.patch; do
+  name=$(basename "$patch")
+  if git apply --reverse --check --directory="$LOCAL_ENGINE_DIR" "$patch" 2>/dev/null; then
+    # Already satisfied by the new upstream code - upstream fixed it themselves.
+    echo "delta already present upstream: $name"
+    delta_notes="${delta_notes}- \`$name\` is already in upstream - delete it from local-deltas/.\n"
+    [ "$delta_status" = "failed" ] || delta_status="obsolete"
+  elif git apply --directory="$LOCAL_ENGINE_DIR" "$patch" 2>/dev/null; then
+    echo "delta applied: $name"
+  elif git apply -C1 --directory="$LOCAL_ENGINE_DIR" "$patch" 2>/dev/null; then
+    echo "delta applied with reduced context: $name"
+    delta_notes="${delta_notes}- \`$name\` applied only with reduced context - check it landed where intended.\n"
+    [ "$delta_status" = "failed" ] || delta_status="fuzzy"
+  else
+    echo "DELTA FAILED: $name"
+    delta_notes="${delta_notes}- \`$name\` did NOT apply - re-apply it by hand before merging.\n"
+    delta_status="failed"
+  fi
+done
+shopt -u nullglob
+
 # The copy loop only refreshes files we already have, so a file upstream adds
 # is never picked up - even when a vendored file now depends on it (v1.17.0's
 # RemotePatchSourceFactory started using the new PullRequestPatchSource, and
@@ -209,37 +246,6 @@ if [ ${#missing[@]} -gt 0 ]; then
   echo "WARNING: no longer present upstream: ${missing[*]}"
   emit "missing_files=${missing[*]}"
 fi
-
-# Re-apply the local deltas (see local-deltas/README.md).
-#
-# Not --3way: that needs the patch to carry git blob index lines and the file
-# to still match the index, and neither holds here - these are cross-repo
-# diffs against files this script just overwrote. Exact apply first, then a
-# reduced-context retry (-C1) so a delta still lands when upstream only moved
-# the surrounding lines around.
-delta_status="clean"
-delta_notes=""
-shopt -s nullglob
-for patch in "$LOCAL_ENGINE_DIR"/local-deltas/*.patch; do
-  name=$(basename "$patch")
-  if git apply --reverse --check --directory="$LOCAL_ENGINE_DIR" "$patch" 2>/dev/null; then
-    # Already satisfied by the new upstream code - upstream fixed it themselves.
-    echo "delta already present upstream: $name"
-    delta_notes="${delta_notes}- \`$name\` is already in upstream - delete it from local-deltas/.\n"
-    [ "$delta_status" = "failed" ] || delta_status="obsolete"
-  elif git apply --directory="$LOCAL_ENGINE_DIR" "$patch" 2>/dev/null; then
-    echo "delta applied: $name"
-  elif git apply -C1 --directory="$LOCAL_ENGINE_DIR" "$patch" 2>/dev/null; then
-    echo "delta applied with reduced context: $name"
-    delta_notes="${delta_notes}- \`$name\` applied only with reduced context - check it landed where intended.\n"
-    [ "$delta_status" = "failed" ] || delta_status="fuzzy"
-  else
-    echo "DELTA FAILED: $name"
-    delta_notes="${delta_notes}- \`$name\` did NOT apply - re-apply it by hand before merging.\n"
-    delta_status="failed"
-  fi
-done
-shopt -u nullglob
 
 # The engine is compiled against a specific morphe-patcher, and - since
 # apk/ApkInspector.kt reads manifests through ARSCLib directly - a specific
