@@ -22,7 +22,6 @@ import app.morphe.engine.options.toPatchBundle
 import app.morphe.engine.options.updateOptionsFileFromSnapshots
 import app.morphe.engine.options.writePatchBundles
 import app.morphe.engine.patches.PatchBundleLoader
-import app.morphe.engine.patches.SupportedAppCatalog
 import app.morphe.engine.patches.supportedVersionsFor
 import app.morphe.engine.util.FileChecksum
 import app.morphe.engine.util.Logger
@@ -712,7 +711,7 @@ object PatchEngine {
                         val manifest = runCatching { ApkInspector.inspect(finalOutputApk) }.getOrNull()
                         val originalPkg = config.historyMetadata?.originalPackageName?.takeIf { it.isNotBlank() } ?: packageName
                         val resolvedFormFactor = config.historyMetadata?.formFactor
-                            ?: SupportedAppCatalog.extractFormFactors(allPatchesForLookup)[originalPkg]
+                            ?: extractFormFactors(allPatchesForLookup)[originalPkg]
                         val record = PatchedAppRecord(
                             packageName = originalPkg,
                             currentPackageName = manifest?.packageName,
@@ -923,6 +922,23 @@ object PatchEngine {
             parent.listFiles()?.filter { file ->
                 file.isDirectory && file.name.startsWith(prefix, ignoreCase = true)
             }?.forEach { it.deleteRecursivelyInParallel() }
+        }
+    }
+
+    /**
+     * LOCAL DELTA (see README.md): a copy of upstream's
+     * `SupportedAppCatalog.extractFormFactors`. That object is the desktop app's
+     * patch-browsing layer and drags in `PatchMetadata`, `SupportedApp`,
+     * `PatchOption` and `DownloadUrlResolver` (which needs the desktop-only
+     * `MorpheConstants`), none of which this server vendors.
+     */
+    private fun extractFormFactors(patches: Iterable<Patch>): Map<String, FormFactor> = buildMap {
+        for (patch in patches) {
+            val compat = patch.compatibility ?: continue
+            for (entry in compat) {
+                val packageName = entry.packageName ?: continue
+                entry.formFactor?.let { putIfAbsent(packageName, it) }
+            }
         }
     }
 
