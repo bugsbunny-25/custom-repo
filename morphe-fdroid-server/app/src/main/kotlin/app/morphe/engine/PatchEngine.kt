@@ -22,6 +22,7 @@ import app.morphe.engine.options.toPatchBundle
 import app.morphe.engine.options.updateOptionsFileFromSnapshots
 import app.morphe.engine.options.writePatchBundles
 import app.morphe.engine.patches.PatchBundleLoader
+import app.morphe.engine.patches.SupportedAppCatalog
 import app.morphe.engine.patches.supportedVersionsFor
 import app.morphe.engine.util.FileChecksum
 import app.morphe.engine.util.Logger
@@ -134,6 +135,8 @@ object PatchEngine {
         val optionsFile: File? = null,
         val updateOptions: Boolean = false,
         val recordHistory: Boolean = true,
+        /** How a successful run keeps [inputApk] in the [OriginalApkStore], null to leave it out. Needs [recordHistory]. */
+        val saveOriginalApk: SaveOriginalApk? = null,
         val appDisplayName: String? = null,
         val historyMetadata: HistoryMetadata? = null,
         /**
@@ -200,6 +203,7 @@ object PatchEngine {
             ApkOutputNaming.outputApkPath(
                 inputApk = config.inputApk,
                 patchesFile = primaryPatchesFile,
+                baseOutputDir = OriginalApkStore.shared.outputBaseFor(config.inputApk),
                 appDisplayName = displayName,
             )
         }
@@ -242,6 +246,8 @@ object PatchEngine {
             val tempDir = session.root
             var mergedApkToCleanup: File? = null
             var obbDirToCleanup: File? = null
+            // The input APK a move kept in the store, deleted once the patcher no longer holds it open
+            var movedOriginalApk: File? = null
             // The OBB files of the bundle, which patches read from the package metadata
             var obbFiles: Map<String, File> = emptyMap()
             val stepResults = mutableListOf<StepResult>()
@@ -711,7 +717,21 @@ object PatchEngine {
                         val manifest = runCatching { ApkInspector.inspect(finalOutputApk) }.getOrNull()
                         val originalPkg = config.historyMetadata?.originalPackageName?.takeIf { it.isNotBlank() } ?: packageName
                         val resolvedFormFactor = config.historyMetadata?.formFactor
-                            ?: extractFormFactors(allPatchesForLookup)[originalPkg]
+                            ?: SupportedAppCatalog.extractFormFactors(allPatchesForLookup)[originalPkg]
+                        // The record points at the kept original, so a repatch still finds it
+                        val keptOriginalApk = config.saveOriginalApk?.takeIf { config.inputApk.isFile }?.let { mode ->
+                            try {
+                                OriginalApkStore.shared.save(config.inputApk, originalPkg, packageVersion)?.also { kept ->
+                                    info("Kept original APK at ${kept.absolutePath}")
+                                    if (mode == SaveOriginalApk.MOVE) movedOriginalApk = config.inputApk
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                warn("Failed to keep original APK: ${e.message ?: e::class.simpleName}")
+                                null
+                            }
+                        }
                         val record = PatchedAppRecord(
                             packageName = originalPkg,
                             currentPackageName = manifest?.packageName,
@@ -721,7 +741,7 @@ object PatchEngine {
                             apkVersion = manifest?.versionName?.takeIf { it.isNotBlank() } ?: packageVersion,
                             apkVersionCode = manifest?.versionCode,
                             formFactor = resolvedFormFactor,
-                            inputApkPath = config.inputApk.absolutePath,
+                            inputApkPath = (keptOriginalApk ?: config.inputApk).absolutePath,
                             outputApkPath = finalOutputApk.absolutePath,
                             outputApkSha256 = sha,
                             outputApkSize = if (size > 0L) size else finalOutputApk.length(),
@@ -780,6 +800,10 @@ object PatchEngine {
             if (!session.retain) {
                 mergedApkToCleanup?.delete()
                 obbDirToCleanup?.deleteRecursively()
+            }
+
+            movedOriginalApk?.let { apk ->
+                if (!apk.delete()) Logger.warn("Kept the original APK, but could not delete ${apk.absolutePath}")
             }
 
             if (config.optionsFile != null && config.updateOptions && patchesSnapshotForFinally.isNotEmpty()) {
@@ -922,23 +946,6 @@ object PatchEngine {
             parent.listFiles()?.filter { file ->
                 file.isDirectory && file.name.startsWith(prefix, ignoreCase = true)
             }?.forEach { it.deleteRecursivelyInParallel() }
-        }
-    }
-
-    /**
-     * LOCAL DELTA (see README.md): a copy of upstream's
-     * `SupportedAppCatalog.extractFormFactors`. That object is the desktop app's
-     * patch-browsing layer and drags in `PatchMetadata`, `SupportedApp`,
-     * `PatchOption` and `DownloadUrlResolver` (which needs the desktop-only
-     * `MorpheConstants`), none of which this server vendors.
-     */
-    private fun extractFormFactors(patches: Iterable<Patch>): Map<String, FormFactor> = buildMap {
-        for (patch in patches) {
-            val compat = patch.compatibility ?: continue
-            for (entry in compat) {
-                val packageName = entry.packageName ?: continue
-                entry.formFactor?.let { putIfAbsent(packageName, it) }
-            }
         }
     }
 

@@ -1,10 +1,10 @@
 Upstream:  https://github.com/MorpheApp/morphe-desktop
-Tag:       v2.3.0
-Commit:    35b011fffdf83a3e4c3d6d44a02ce3a78e3a0696
+Tag:       v2.4.0
+Commit:    10825eb03adc157bece88f8ff4678d99ef0740f1
 Path:      src/main/kotlin/app/morphe/engine
-Vendored:  2026-11-25
-Patcher:   app.morphe:morphe-patcher 2.5.0 (matches morphe-desktop's own catalog pin)
-ARSCLib:   com.github.MorpheApp:ARSCLib 50418a07a8 (likewise)
+Vendored:  2026-11-27
+Patcher:   app.morphe:morphe-patcher 2.6.0 (matches morphe-desktop's own catalog pin)
+ARSCLib:   com.github.MorpheApp:ARSCLib 6435903152 (likewise)
 
 See README.md in this directory for what was taken, what was left behind, and
 the list of local deltas to re-apply when re-syncing.
