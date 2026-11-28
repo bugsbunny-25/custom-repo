@@ -8,16 +8,16 @@
  import app.morphe.engine.patches.supportedVersionsFor
  import app.morphe.engine.util.FileChecksum
  import app.morphe.engine.util.Logger
-@@ -712,7 +711,7 @@
+@@ -717,7 +716,7 @@
                          val manifest = runCatching { ApkInspector.inspect(finalOutputApk) }.getOrNull()
                          val originalPkg = config.historyMetadata?.originalPackageName?.takeIf { it.isNotBlank() } ?: packageName
                          val resolvedFormFactor = config.historyMetadata?.formFactor
 -                            ?: SupportedAppCatalog.extractFormFactors(allPatchesForLookup)[originalPkg]
 +                            ?: extractFormFactors(allPatchesForLookup)[originalPkg]
-                         val record = PatchedAppRecord(
-                             packageName = originalPkg,
-                             currentPackageName = manifest?.packageName,
-@@ -923,6 +922,23 @@
+                         // The record points at the kept original, so a repatch still finds it
+                         val keptOriginalApk = config.saveOriginalApk?.takeIf { config.inputApk.isFile }?.let { mode ->
+                             try {
+@@ -946,6 +945,23 @@
              parent.listFiles()?.filter { file ->
                  file.isDirectory && file.name.startsWith(prefix, ignoreCase = true)
              }?.forEach { it.deleteRecursivelyInParallel() }

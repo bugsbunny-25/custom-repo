@@ -1,7 +1,7 @@
 --- a/PatchEngine.kt
 +++ b/PatchEngine.kt
-@@ -118,6 +118,16 @@
-         val recordHistory: Boolean = true,
+@@ -139,6 +139,16 @@
+         val saveOriginalApk: SaveOriginalApk? = null,
          val appDisplayName: String? = null,
          val historyMetadata: HistoryMetadata? = null,
 +        /**
@@ -17,7 +17,7 @@
      ) {
          /** The steps a run with this config goes through, see [PatchEvent.StepStarted]. */
          val steps: List<PatchStep>
-@@ -465,6 +475,7 @@
+@@ -494,6 +504,7 @@
                              jsonDisabledPatches = jsonDisabled,
                              exclusive = config.exclusiveMode,
                              force = config.forceCompatibility,
@@ -25,7 +25,7 @@
                              log = ::info,
                          )
  
-@@ -505,6 +516,7 @@
+@@ -534,6 +545,7 @@
                          disabledPatches = config.disabledPatches,
                          exclusiveMode = config.exclusiveMode,
                          forceCompatibility = config.forceCompatibility,
@@ -33,7 +33,7 @@
                          log = ::info,
                      )
                      val jsonOptions = config.optionsFile?.takeIf { it.exists() }?.let { file ->
-@@ -765,6 +777,7 @@
+@@ -817,6 +829,7 @@
          jsonDisabledPatches: Set<String>,
          exclusive: Boolean,
          force: Boolean,
@@ -41,7 +41,7 @@
          log: (String) -> Unit,
      ): Set<Patch> = buildSet {
          val enabledLower = enabledNames.map { it.lowercase() }.toSet()
-@@ -773,7 +786,7 @@
+@@ -825,7 +838,7 @@
          patches.withIndex().forEach patchLoop@{ (i, patch) ->
              val patchName = patch.name ?: return@patchLoop
              val patchNameLower = patchName.lowercase()
@@ -50,7 +50,7 @@
                  return@patchLoop
              }
  
-@@ -810,6 +823,7 @@
+@@ -862,6 +875,7 @@
          disabledPatches: Set<String>,
          exclusiveMode: Boolean,
          forceCompatibility: Boolean,
@@ -58,7 +58,7 @@
          log: (String) -> Unit,
      ): Set<Patch> = buildSet {
          val disabledLower = disabledPatches.map { it.lowercase() }.toSet()
-@@ -819,7 +833,10 @@
+@@ -871,7 +885,10 @@
              val patchName = patch.name ?: return@patchLoop
              val patchNameLower = patchName.lowercase()
  
@@ -70,7 +70,7 @@
                  return@patchLoop
              }
  
-@@ -845,11 +862,19 @@
+@@ -897,11 +914,19 @@
          packageName: String,
          packageVersion: String,
          force: Boolean,
