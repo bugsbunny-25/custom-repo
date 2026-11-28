@@ -1,0 +1,50 @@
+--- a/MultiSourceLoader.kt
++++ b/MultiSourceLoader.kt
+@@ -5,8 +5,6 @@
+ 
+ package app.morphe.engine
+ 
+-import app.morphe.engine.model.PatchMetadata
+-import app.morphe.engine.patches.SupportedAppCatalog.toMetadata
+ import app.morphe.engine.util.Logger
+ import app.morphe.engine.workspace.WorkspaceManager
+ import app.morphe.patcher.patch.Patch
+@@ -22,10 +20,16 @@
+ /** Loads patches in parallel from multiple patch bundle files. */
+ object MultiSourceLoader {
+ 
+-    /** A bundle's parsed patches, with their metadata converted on first use. */
+-    private class Parsed(val stamp: String, val patches: Set<Patch>) {
+-        val metadata: List<PatchMetadata> by lazy { patches.map { it.toMetadata() } }
+-    }
++    /**
++     * A bundle's parsed patches.
++     *
++     * LOCAL DELTA (see README.md): upstream also converts them to `PatchMetadata`
++     * here (`metadata`, `metadataOf`, `cachedMetadata`) for the desktop app's
++     * patch-browsing screens, via `SupportedAppCatalog.toMetadata`. That catalog
++     * drags in `SupportedApp`, `PatchOption` and `DownloadUrlResolver` (which
++     * needs the desktop-only `MorpheConstants`), none of which this server vendors.
++     */
++    private class Parsed(val stamp: String, val patches: Set<Patch>)
+ 
+     /**
+      * Parsed patches per source ID, reused while the bundle file is unchanged, so a reload
+@@ -35,17 +39,6 @@
+ 
+     private fun stampOf(file: File) = "${file.absolutePath}:${file.length()}:${file.lastModified()}"
+ 
+-    /** [source]'s patches as [PatchMetadata], converted once per parsed bundle. */
+-    fun metadataOf(source: LoadedSource): List<PatchMetadata> =
+-        parsedCache[source.sourceId]?.takeIf { it.patches === source.patches }?.metadata
+-            ?: source.patches.map { it.toMetadata() }
+-
+-    /** Metadata of [file] if a source has it parsed and it is unchanged since, so screens skip loading it again. */
+-    fun cachedMetadata(file: File): List<PatchMetadata>? {
+-        val stamp = stampOf(file)
+-        return parsedCache.values.firstOrNull { it.stamp == stamp }?.metadata
+-    }
+-
+     data class SourceInput(
+         val sourceId: String,
+         val sourceName: String,

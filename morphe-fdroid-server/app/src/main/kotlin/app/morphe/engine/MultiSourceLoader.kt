@@ -21,10 +21,21 @@ import java.util.concurrent.ConcurrentHashMap
 object MultiSourceLoader {
 
     /**
+     * A bundle's parsed patches.
+     *
+     * LOCAL DELTA (see README.md): upstream also converts them to `PatchMetadata`
+     * here (`metadata`, `metadataOf`, `cachedMetadata`) for the desktop app's
+     * patch-browsing screens, via `SupportedAppCatalog.toMetadata`. That catalog
+     * drags in `SupportedApp`, `PatchOption` and `DownloadUrlResolver` (which
+     * needs the desktop-only `MorpheConstants`), none of which this server vendors.
+     */
+    private class Parsed(val stamp: String, val patches: Set<Patch>)
+
+    /**
      * Parsed patches per source ID, reused while the bundle file is unchanged, so a reload
      * after a change to the source list does not read every bundle again.
      */
-    private val parsedCache = ConcurrentHashMap<String, Pair<String, Set<Patch>>>()
+    private val parsedCache = ConcurrentHashMap<String, Parsed>()
 
     private fun stampOf(file: File) = "${file.absolutePath}:${file.length()}:${file.lastModified()}"
 
@@ -72,7 +83,7 @@ object MultiSourceLoader {
 
     private suspend fun loadOne(input: SourceInput): LoadedSource = withContext(Dispatchers.IO) {
         val stamp = stampOf(input.patchFile)
-        parsedCache[input.sourceId]?.takeIf { it.first == stamp }?.let { (_, patches) ->
+        parsedCache[input.sourceId]?.takeIf { it.stamp == stamp }?.patches?.let { patches ->
             Logger.info("MultiSourceLoader: reused ${patches.size} parsed patches for '${input.sourceName}'")
             return@withContext LoadedSource(
                 sourceId = input.sourceId,
@@ -83,7 +94,7 @@ object MultiSourceLoader {
         val tempCopy = WorkspaceManager.createShadowCopy(input.patchFile, prefix = "morphe-mp-${input.sourceId}")
         try {
             val patches = loadPatchesFromJar(setOf(tempCopy))
-            parsedCache[input.sourceId] = stamp to patches
+            parsedCache[input.sourceId] = Parsed(stamp, patches)
             Logger.info("MultiSourceLoader: loaded ${patches.size} patches from '${input.sourceName}'")
             LoadedSource(
                 sourceId = input.sourceId,

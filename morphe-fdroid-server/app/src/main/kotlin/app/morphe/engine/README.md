@@ -102,7 +102,7 @@ download URLs, and keeps its own catalog in SQLite.
 
 ## Local deltas from upstream
 
-Kept as small as possible so re-syncing stays cheap. Three, as of v2.3.0:
+Kept as small as possible so re-syncing stays cheap. Four, as of v2.4.0:
 
 1. **`PatchEngine.kt` - caller-supplied version filter.** `Config.versionFilter`
    (null by default, which keeps upstream's check) replaces the
@@ -128,7 +128,13 @@ Kept as small as possible so re-syncing stays cheap. Three, as of v2.3.0:
    patch-browsing layer listed above as not vendored, and pulling it in drags
    `DownloadUrlResolver` and the desktop-only `MorpheConstants` behind it, so
    `PatchEngine` carries a private copy of the eight-line function instead.
-4. Nothing else. All other files are byte-identical to upstream.
+4. **`MultiSourceLoader.kt` - no patch metadata cache.** v2.4.0 made the
+   loader's parse cache also convert each bundle to `PatchMetadata` (through
+   `SupportedAppCatalog.toMetadata`) for the desktop app's patch-browsing
+   screens, adding `metadataOf` and `cachedMetadata`. Nothing here calls
+   either, and they pull in the same catalog as delta 3, so they are dropped;
+   the parse cache itself is kept.
+5. Nothing else. All other files are byte-identical to upstream.
 
 Two deltas were dropped at v1.20.0 because upstream adopted them:
 
